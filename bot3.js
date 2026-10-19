@@ -155,7 +155,7 @@ async function startBot(){
 
       if(lower==='my shop'){ const {data:s}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle(); if(!s) return sock.sendMessage(from,{text:'No shop. .Auth my store'}); return sock.sendMessage(from,{text:`*${s.shop_name}*\nKey: ${s.auth_key}\n${s.lat?'📍 pinned':'📍 send location'}`}) }
 
-      if(lower==='my stock'){
+/*      if(lower==='my stock'){
         const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).order('created_at',{ascending:false}).limit(30)
         if(!list?.length) return sock.sendMessage(from,{text:'No stock'})
         let msg=`Your Stock (${list.length}):\n`; list.forEach((s,i)=>{
@@ -163,7 +163,24 @@ async function startBot(){
           const left=Math.floor((SEVEN_DAYS-(Date.now()-c))/(24*60*60*1000))
           msg+=`${i+1}. ${s.display} | ${s.price} | ${left>=0? left+'d left':'EXPIRED'}\n`
         }); msg+=`\nRENEW or DELETE product`; return sock.sendMessage(from,{text:msg})
-      }
+      }*/
+
+if(lower==='my stock'){
+  const {data: shopAcc} = await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
+  const realPhone = shopAcc?.phone || phone
+  let {data:list} = await supabase.from('stocks').select('*').eq('phone', realPhone).order('created_at',{ascending:false}).limit(50)
+  
+  if(!list?.length) return sock.sendMessage(from,{text:'No stock yet. ADD 20kg gas $30'})
+
+  let text = `📦 ${shopAcc?.shop_name || 'MY STOCK'} (${list.length})\n\n`
+  list.forEach((s,i)=>{
+    text += `${i+1}. ${s.display} | $${s.price} | Qty:${s.qty}\n`
+  })
+  text += `\nTo delete: DELETE 1\nTo renew: RENEW ALL`
+
+  const codeBox = "```\n" + text.replace(/```/g,'') + "\n```"
+  return sock.sendMessage(from,{text: codeBox})
+}
 
       if(lower.startsWith('delete')){
         const query=text.slice(6).trim()
