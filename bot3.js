@@ -84,7 +84,7 @@ async function startBot(){
       */
       const from=m.key.remoteJid
       if(from.endsWith('@g.us')) return // ignore all groups
-      let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+     /* let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
       try{ 
         const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
         if(mapped) phone = mapped.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
@@ -94,7 +94,33 @@ async function startBot(){
           const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant)
           phone = (mp||m.key.participant).split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
         }catch{ phone = m.key.participant.split('@')[0].split(':')[0].replace(/[^0-9]/g,'') }
-      }
+      }*/
+
+       function cleanPhone(jid){
+       if(!jid) return ''
+       let p = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+       // fix 2637795969660 -> 263779596966 (Baileys adds trailing :0)
+       if(p.length === 13 && p.startsWith('263') && p.endsWith('0')) p = p.slice(0, -1)
+       // fix 0779596966 -> 263779596966
+       if(p.startsWith('0') && p.length >= 10) p = '263' + p.slice(1)
+       // cut to 12 max for ZW
+       if(p.length > 12) p = p.slice(0,12)
+       return p
+     }
+
+      let phone = cleanPhone(from)
+      try{ 
+       const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
+       if(mapped) phone = cleanPhone(mapped)
+     }catch{}
+       if(m.key.participant){
+      try{ 
+       const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant)
+       phone = cleanPhone(mp||m.key.participant)
+     }catch{ phone = cleanPhone(m.key.participant) }
+    }
+
+//console.log('CLEAN PHONE:', from, '->', phone)
 
       let text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || ''
       text=text.trim()
@@ -151,7 +177,7 @@ async function startBot(){
           const c = typeof s.created_at==='number' ? s.created_at : new Date(s.created_at).getTime()
           const left=Math.floor((SEVEN_DAYS-(Date.now()-c))/(24*60*60*1000))
           msg+=`${i+1}. ${s.display} | ${s.price} | ${left>=0? left+'d left':'EXPIRED'}\n`
-        }); msg+=`\nRENEW or DELETE handbag`; return sock.sendMessage(from,{text:msg})
+        }); msg+=`\nRENEW or DELETE product`; return sock.sendMessage(from,{text:msg})
       }
 
       if(lower.startsWith('delete')){
@@ -181,7 +207,7 @@ async function startBot(){
           return sock.sendMessage(from,{text:`♻️ Renewed ALL (${list.length}) stocks for 7 more days!`})
         }else{
           const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).ilike('item', `%${query}%`)
-          if(!list?.length) return sock.sendMessage(from,{text:`❌ No stock matching "${query}"`})
+          if(!list?.length) return sock.sendMessage(from,{text:`No stock matching "${query}"`})
           await supabase.from('stocks').update({created_at: now}).ilike('item', `%${query}%`).eq('phone', phone)
           return sock.sendMessage(from,{text:`♻️ Renewed ${list.length} item(s): ${list.map(s=>s.display).join(', ')} for 7 days`})
         }
@@ -189,12 +215,12 @@ async function startBot(){
 
       if(lower.startsWith('add')){
         const lines=text.split('\n').map(l=>l.trim()).filter(l=>l)
-        if(lines.length<4) return sock.sendMessage(from,{text:`❌ Format:\nADD\nProduct Name\n$Price\nqty number\n+ PHOTO`})
+        if(lines.length<4) return sock.sendMessage(from,{text:` incorrect Format:\nADD\nProduct Name\n$Price\nqty number\n+ PHOTO`})
         const {data: shop}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
-        if(!shop) return sock.sendMessage(from,{text:`❌ Not auth. .Auth my store`})
+        if(!shop) return sock.sendMessage(from,{text:` Not authenticated. write ".Auth my store"`})
         const productName=lines[1]; const priceRaw=lines[2]; const qtyRaw=lines[3]
         if(!priceRaw.includes('$')||!qtyRaw.toLowerCase().includes('qty')) return sock.sendMessage(from,{text:`❌ Line3 $ and Line4 qty required`})
-        if(!hasImage) return sock.sendMessage(from,{text:`❌ Photo required`})
+        if(!hasImage) return sock.sendMessage(from,{text:` Photo required`})
         try{
           const buf=await downloadMediaMessage(m,'buffer',{}, { logger:undefined, reuploadRequest: sock.updateMediaMessage })
           const imageUrl=await uploadImage(buf, phone)
@@ -203,12 +229,12 @@ async function startBot(){
           const cleanQty = qtyRaw.replace(/qty/i,'').trim().match(/\d+/)?.[0] || '1'
           await supabase.from('stocks').insert({ item: productName.toLowerCase(), display: productName, price: cleanPrice, qty: cleanQty, phone: shop.phone, shop_name: shop.shop_name, wa_link: shop.wa_link, image_url: imageUrl, lat: shop.lat, lng: shop.lng, created_at: Date.now() })
           return sock.sendMessage(from,{text:`✅ Added *${productName}* | ${cleanPrice}\nExpires in 7 days. Use RENEW to extend.\nType .manual for info`})
-        }catch(e){ return sock.sendMessage(from,{text:`❌ Upload failed: ${e.message}`}) }
+        }catch(e){ return sock.sendMessage(from,{text:`Upload failed: ${e.message}`}) }
       }
 
       if(text.length>=2){
         if(['hi','hello','hey','hii','heyy'].includes(lower)){
-          return sock.sendMessage(from,{text:`👋 Welcome to Shoppas!\n\nSearch like:\n• playstation 5\n• playstation 5 under $450\n• handbag near me\n• iphone under $500 near me\n\nSELL: .Auth my store`})
+          return sock.sendMessage(from,{text:` Welcome to Shoppas!\n\nSearch like:\n• playstation 5\n• playstation 5 under $450\n• handbag near me\n• iphone under $500 near me\n\nSELL: .Auth my store`})
         }
 
         let raw = lower
@@ -277,7 +303,8 @@ async function startBot(){
         if(found.length){
           const toShow = wantNear ? found.slice(0,10) : found.slice(0,15)
           for(let s of toShow){
-            const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} ${maxPrice?`(≤$${maxPrice})`:''} | Qty: ${s.qty}\n📞 ${s.wa_link}\n${wantNear && s.lat? '📍 CLOSEST FIRST':''}`
+           // const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} ``\n  Qty: ${s.qty}\n📞 ${s.wa_link}\n${wantNear && s.lat? '📍 CLOSEST FIRST':''}`
+            const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} \n  Qty: ${s.qty}\n ${s.wa_link}\n${wantNear && s.lat ? '📍 CLOSEST FIRST' : ''}`
             if(s.image_url) await sock.sendMessage(from,{image:{url:s.image_url}, caption})
             else await sock.sendMessage(from,{text:caption})
             if(s.lat) await sock.sendMessage(from,{location:{degreesLatitude:s.lat, degreesLongitude:s.lng}})
@@ -286,7 +313,7 @@ async function startBot(){
             await sock.sendMessage(from,{text:`📍 Send your location to sort by nearest! Tap 📎 > Location`})
           }
         }else{
-          let reply=`❌ *${text}* not available${maxPrice?` under $${maxPrice}`:''}\n\nWe hide expired (>7d) stock.\nTry: "${search}"`
+          let reply=`*${text}* not available${maxPrice?` under $${maxPrice}`:''}\n\n.\nTry: "${search}"`
           if(searchCount[phone]%5===0) reply+=`\n\n🔥 Share: wa.me/263775735964`
           await sock.sendMessage(from,{text:reply})
         }
