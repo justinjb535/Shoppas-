@@ -77,9 +77,17 @@ async function startBot(){
       const m=messages[0]
       if(!m?.message || m.key.fromMe) return
       const from=m.key.remoteJid
-      let phone = from.split('@')[0]
-      try{ const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from); if(mapped) phone = mapped.split('@')[0] }catch{}
-      if(m.key.participant){ try{ const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant); phone = (mp||m.key.participant).split('@')[0] }catch{ phone = m.key.participant.split('@')[0] } }
+let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+try{ 
+  const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
+  if(mapped) phone = mapped.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+}catch{}
+if(m.key.participant){
+  try{ 
+    const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant)
+    phone = (mp||m.key.participant).split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+  }catch{ phone = m.key.participant.split('@')[0].split(':')[0].replace(/[^0-9]/g,'') }
+}
 
       let text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || ''
       text=text.trim()
@@ -210,62 +218,29 @@ Commands: my shop | my stock | RENEW | DELETE | ADD
         }catch(e){ return sock.sendMessage(from,{text:`❌ Upload failed: ${e.message}`}) }
       }
 
-      // SEARCH - ONLY ACTIVE <7 DAYS
-/*      if(text.length>=2){
-        if(['hi','hello','hey','hii','heyy'].includes(lower)){ return sock.sendMessage(from,{text:`👋 Welcome to Shoppas!\n\nType product name to search (only active 7-day stock shown)\nSELL: .Auth my store`}) }
-        const search=lower
-        searchCount[phone]=(searchCount[phone]||0)+1
-        const validFrom = Date.now() - SEVEN_DAYS
-
-        let found=[]
-        const {data: exact}=await supabase.from('stocks').select('*').eq('item', search).gte('created_at', validFrom).limit(10)
-        found=exact||[]
-        if(found.length===0){
-          const {data: like}=await supabase.from('stocks').select('*').ilike('item', `%${search}%`).gte('created_at', validFrom).limit(10)
-          found=(like||[]).filter(s=>{
-            const numSearch=search.match(/\d+/)?.[0]; const numItem=s.item.match(/\d+/)?.[0]
-            if(numSearch && numItem && numSearch!==numItem) return false
-            return true
-          })
-        }
-        if(found.length){
-          for(let s of found){
-            const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} | Qty: ${s.qty}\n📞 ${s.wa_link}\n♻️ ${Math.floor((SEVEN_DAYS-(Date.now()-s.created_at))/(24*60*60*1000))}d left`
-            if(s.image_url) await sock.sendMessage(from,{image:{url:s.image_url}, caption})
-            else await sock.sendMessage(from,{text:caption})
-            if(s.lat) await sock.sendMessage(from,{location:{degreesLatitude:s.lat, degreesLongitude:s.lng}})
-          }
-        }else{
-          let reply=`❌ *${text}* not available (or expired >7d)\n\nWe hide expired stock to keep search accurate.\nTry shorter word.`
-          if(searchCount[phone]%5===0) reply+=`\n\n🔥 Share Shoppas: wa.me/263775735964 - Type hi to search`
-          await sock.sendMessage(from,{text:reply})
-          if(searchCount[phone]%10===0){
-            await sock.sendMessage(from, { contacts: { displayName: 'Shoppas', contacts: [{ vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Shoppas Zimbabwe\nTEL;type=CELL;wa-id=263775735964:+263775735964\nEND:VCARD` }] } })
-          }
-        }
-      }*/
-      // --- SMART SEARCH BLOCK (replace your if(text.length>=2) search part) ---
 if(text.length>=2){
-  if(['hi','hello','hey','hii','heyy'].includes(lower)){ 
+  if(['hi','hello','hey','hii','heyy'].includes(lower)){
     return sock.sendMessage(from,{text:`👋 Welcome to Shoppas!\n\nSearch like:\n• playstation 5\n• playstation 5 under $450\n• handbag near me\n• iphone under $500 near me\n\nSELL: .Auth my store`})
   }
-  
-  // PARSE QUERY
+
   let raw = lower
   let maxPrice = null
   let wantNear = raw.includes('near me') || raw.includes('nearby')
-  
-  // extract price: under $450, below $450, <$450, $450 max
-  const priceMatch = raw.match(/(?:under|below|less than|<|max|max price|budget)\s*\$?\s*(\d+)|(\$)\s*(\d+)\s*(max)?/i) || raw.match(/\$(\d+)/)
+
+  // 1. Extract max price - ONLY if $ or under/below present
+  const pricePattern = /(?:under|below|less than|<|budget)\s*\$?\s*(\d+)|(\$)\s*(\d+)/i
+  const priceMatch = raw.match(pricePattern)
   if(priceMatch){
-    const num = priceMatch[1] || priceMatch[3] || priceMatch[0].replace(/[^0-9]/g,'')
-    if(num) maxPrice = parseInt(num)
-    // remove price part from search term
-    raw = raw.replace(/(?:under|below|less than|<|max|max price|budget)?\s*\$?\s*\d+\s*(?:dollars|usd|max)?/gi,'').trim()
+    maxPrice = parseInt(priceMatch[1] || priceMatch[3])
   }
+
+  // 2. Remove ONLY the price part, NOT bare numbers like PS5's 5
+  raw = raw.replace(/(?:under|below|less than|<|budget)\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?/gi,'').trim()
   raw = raw.replace(/near me|nearby/gi,'').trim()
   const search = raw.replace(/\s+/g,' ').trim()
-  
+
+  console.log(`PARSED: "${lower}" -> product="${search}" max=$${maxPrice}`)
+
   if(search.length<2) return
 
   searchCount[phone]=(searchCount[phone]||0)+1
@@ -283,15 +258,13 @@ if(text.length>=2){
     })
   }
 
-  // FILTER BY PRICE
   if(maxPrice && found.length){
     found = found.filter(s=>{
-      const p = parseInt((s.price||'').replace(/[^0-9]/g,''))
-      return !isNaN(p) ? p <= maxPrice : true
+      const p = parseInt(String(s.price||'').replace(/[^0-9]/g,''))
+      return !isNaN(p) ? p <= maxPrice : false
     })
   }
 
-  // SORT BY NEAREST if user pinned location
   if(wantNear && found.length && userFlow[phone]?.lat){
     const {lat:ulat, lng:ulng} = userFlow[phone]
     const dist = (la1,lo1,la2,lo2)=>{
@@ -302,14 +275,12 @@ if(text.length>=2){
     found = found.sort((a,b)=>{
       if(!a.lat||!b.lat) return 0
       return dist(ulat,ulng,a.lat,a.lng) - dist(ulat,ulng,b.lat,b.lng)
-    })
-    found = found.slice(0,10) // closest 10
+    }).slice(0,10)
   }
 
   if(found.length){
     for(let s of found){
-      const priceNum = parseInt((s.price||'').replace(/[^0-9]/g,''))
-      const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} ${maxPrice?`(≤$${maxPrice})`:''}\n | Qty: ${s.qty}\n📞 ${s.wa_link}\n${wantNear && s.lat? '📍 CLOSEST MATCH':''}`
+      const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} ${maxPrice?`(≤$${maxPrice})`:''} | Qty: ${s.qty}\n📞 ${s.wa_link}\n${wantNear && s.lat? '📍 CLOSEST MATCH':''}`
       if(s.image_url) await sock.sendMessage(from,{image:{url:s.image_url}, caption})
       else await sock.sendMessage(from,{text:caption})
       if(s.lat) await sock.sendMessage(from,{location:{degreesLatitude:s.lat, degreesLongitude:s.lng}})
@@ -318,12 +289,9 @@ if(text.length>=2){
       await sock.sendMessage(from,{text:`📍 Send your location to sort by nearest! Tap 📎 > Location`})
     }
   }else{
-    let reply=`❌ *${text}* not available${maxPrice?` under $${maxPrice}`:''}\n\n${wantNear?'No close results either.\n':''}We hide expired (>7d) stock.\nTry: "${search}"`
+    let reply=`❌ *${text}* not available${maxPrice?` under $${maxPrice}`:''}\n\nWe hide expired (>7d) stock.\nTry: "${search}"`
     if(searchCount[phone]%5===0) reply+=`\n\n🔥 Share: wa.me/263775735964`
     await sock.sendMessage(from,{text:reply})
-    if(searchCount[phone]%10===0){
-      await sock.sendMessage(from, { contacts: { displayName: 'Shoppas', contacts: [{ vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Shoppas Zimbabwe\nTEL;type=CELL;wa-id=263775735964:+263775735964\nEND:VCARD` }] } })
-    }
   }
 }
     }catch(e){ console.log('HANDLER ERROR:', e.message) }
