@@ -79,23 +79,8 @@ async function startBot(){
     try{
       const m=messages[0]
       if(!m?.message || m.key.fromMe) return
-      /*const from=m.key.remoteJid
-      let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-      */
       const from=m.key.remoteJid
       if(from.endsWith('@g.us')) return // ignore all groups
-     /* let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-      try{ 
-        const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
-        if(mapped) phone = mapped.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-      }catch{}
-      if(m.key.participant){
-        try{ 
-          const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant)
-          phone = (mp||m.key.participant).split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-        }catch{ phone = m.key.participant.split('@')[0].split(':')[0].replace(/[^0-9]/g,'') }
-      }*/
-
        function cleanPhone(jid){
        if(!jid) return ''
        let p = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
@@ -165,7 +150,7 @@ async function startBot(){
             return `${i+1}. ${s.display} | ${s.price} | ${status}`
           }).join('\n')
         }
-        return sock.sendMessage(from,{text:`📖 *SHOppAS MANUAL - How We Work*\n\n*FOR SHOP OWNERS:*\n1. Stock lives 7 DAYS only. After 7 days, it is HIDDEN from buyers (not deleted) to keep searches accurate.\n2. You MUST RENEW before buyers see it again.\n   • RENEW -> renews ALL your expired stock\n   • RENEW handbag -> renews that product only\n3. After 90 DAYS without renewal, we DELETE it permanently.\n4. To DELETE: DELETE handbag or DELETE 1\n\n*WHY?*\nWe force daily accuracy. No selling what you sold last week.\n\n*YOUR SHOP:*\n${shop? `${shop.shop_name}\nOwner: ${shop.owner}\nKey: ${shop.auth_key}` : 'Not authenticated yet'}\n\n*YOUR STOCK:*\n${stockMsg}\n\nCommands: my shop | my stock | RENEW | DELETE | ADD\n`})
+        return sock.sendMessage(from,{text:`📖 *SHoppas MANUAL - How We Work*\n\n*FOR SHOP OWNERS:*\n1. Stock lives 7 DAYS only. After 7 days, it is HIDDEN from buyers (not delet1ed) to keep searches accurate.\n2. You MUST RENEW before buyers see it again.\n   • RENEW -> renews ALL your expired stock\n   • RENEW handbag -> renews that product only\n3. After 90 DAYS without renewal, we DELETE it permanently.\n4. To DELETE: DELETE handbag or DELETE 1\n\n*WHY?*\nWe force daily accuracy. No selling what you sold last week.\n\n*The key alveolCloudKey..._Store is for 3 future things:*\n\n1. *Web dashboard* — when you login at shoppas.com/login, you paste key to prove you own the shop.\n\n2. *If you change number* — you lost phone? You can still claim your old shop with the key: CLAIM alveolCloudKey...\n\n3. *Security* — if someone spoofs your number (rare), we will soon require key for *DELETE ALL* or *RENEW ALL*.\n\n *What to do with it NOW:* \n\n- *Save it* in notes. Don't share.\n- Type *my shop* — it shows your key. Screenshot it.\n- You can ignore it for daily selling — just *ADD*, *my stock*, *RENEW*, *DELETE* works with phone only.\n\n*YOUR SHOP:*\n${shop? `${shop.shop_name}\nOwner: ${shop.owner}\nKey: ${shop.auth_key}` : 'Not authenticated yet'}\n\n*YOUR STOCK:*\n${stockMsg}\n\nCommands: my shop | my stock | RENEW | DELETE | ADD\n`})
       }
 
       if(lower==='my shop'){ const {data:s}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle(); if(!s) return sock.sendMessage(from,{text:'No shop. .Auth my store'}); return sock.sendMessage(from,{text:`*${s.shop_name}*\nKey: ${s.auth_key}\n${s.lat?'📍 pinned':'📍 send location'}`}) }
