@@ -79,7 +79,11 @@ async function startBot(){
     try{
       const m=messages[0]
       if(!m?.message || m.key.fromMe) return
+      /*const from=m.key.remoteJid
+      let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
+      */
       const from=m.key.remoteJid
+      if(from.endsWith('@g.us')) return // ignore all groups
       let phone = from.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
       try{ 
         const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
