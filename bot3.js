@@ -221,7 +221,8 @@ async function startBot(){
           maxPrice = parseInt(priceMatch[1] || priceMatch[2])
         }
 
-        raw = raw.replace(/(?:under|below|less than|<|budget)\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?/gi,'').trim()
+        //raw = raw.replace(/(?:under|below|less than|<|budget)\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?/gi,'').trim()
+        raw = raw.replace(/(?:for\s*)?(?:under|below|less than|<|budget)?\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?|for/gi,'').trim()
         raw = raw.replace(/near me|nearby/gi,'').trim()
         const search = raw.replace(/\s+/g,' ').trim()
 
