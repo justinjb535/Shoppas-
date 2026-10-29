@@ -1,326 +1,287 @@
-import dotenv from 'dotenv'
-dotenv.config()
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys'
-import express from 'express'
-import fs from 'fs'
-import QRCode from 'qrcode'
-import { createClient } from '@supabase/supabase-js'
+import express from 'express';
+import dotenv from 'dotenv';
+import AfricasTalking from 'africastalking';
+import { createClient } from '@supabase/supabase-js';
+import Imap from 'imap';
+import { simpleParser } from 'mailparser';
 
-const app = express()
-app.use(express.json())
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
-const SEVEN_DAYS = 7*24*60*60*1000
-const NINETY_DAYS = 90*24*60*60*1000
+dotenv.config();
+const app = express();
+app.use(express.json());
 
-async function loadAuth(){
+const {
+  AT_USERNAME, AT_API_KEY, YOUR_ZIM_SENDER,
+  SUPABASE_URL, SUPABASE_KEY,
+  WHATSAPP_TOKEN, PHONE_ID, VERIFY_TOKEN, PROCESS_SECRET,
+  OWNER_NUMBER, FNB_EMAIL, FNB_PASS,
+  FNB_HOST = 'imap.gmail.com'
+} = process.env;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const atSMS = AfricasTalking({ apiKey: AT_API_KEY, username: AT_USERNAME }).SMS;
+
+// === RATE ENGINE ===
+let MARKET_RATE = 17.50;
+const MARKUP = 1.00;
+const Skyie_Fee = 0.025;
+const ECOCASH_FEE = 0.015;
+let SELL_RATE = MARKET_RATE + MARKUP;
+
+async function fetchRate(){
   try{
-    const {data} = await supabase.from('baileys_auth').select('data').eq('id',1).single()
-    if(data?.data){
-      if(!fs.existsSync('auth_info')) fs.mkdirSync('auth_info')
-      for(let k in data.data) fs.writeFileSync(`auth_info/${k}.json`, JSON.stringify(data.data[k]))
+    const r = await fetch('https://open.er-api.com/v6/latest/USD');
+    const j = await r.json();
+    if(j.rates?.ZAR){
+      MARKET_RATE = Number(j.rates.ZAR);
+      SELL_RATE = MARKET_RATE + MARKUP;
+      await supabase.from('settings').upsert({ key:'usd_zar_rate', value:MARKET_RATE, sell_rate:SELL_RATE }, {onConflict:'key'});
+      console.log(`Rate Market R${MARKET_RATE} Sell R${SELL_RATE}`);
     }
-  }catch{}
+  }catch{ console.log('Rate fail using', MARKET_RATE); }
 }
-async function saveAuth(){
+setInterval(fetchRate, 24*60*60*1000);
+fetchRate();
+
+/*function calculateCleanSend(usdWanted){
+  const totalRand = usdWanted * SELL_RATE;
+  const usdToSend = usdWanted / (1 - ECOCASH_FEE - Skyie_Fee);
+  const marketCost = usdToSend * MARKET_RATE;
+  const profit = totalRand - marketCost;
+  return {
+    marketRate: MARKET_RATE,
+    sellRate: SELL_RATE,
+    usdWanted,
+    usdToSend: Number(usdToSend.toFixed(2)),
+    customerPaysRand: Number(totalRand.toFixed(2)),
+    profitRand: Number(profit.toFixed(2)),
+    message: `Rate: R${SELL_RATE.toFixed(2)}/$1 (Market R${MARKET_RATE.toFixed(2)}+R${MARKUP})\nYou pay: R${totalRand.toFixed(2)} for $${usdWanted}\nReceiver gets: $${usdWanted} clean (send $${usdToSend.toFixed(2)} cover EcoCash 1.5%)`
+  };
+}*/
+
+function calculateCleanSend(usdWanted){
+  const totalRand = usdWanted * SELL_RATE; // Customer pays in SA
+  const usdToSend = usdWanted / (1 - ECOCASH_FEE); // Only cover EcoCash: $100 / 0.985 = $101.52
+  const marketCost = usdToSend * MARKET_RATE; // What it costs you in USD market
+  const totalProfitRand = totalRand - marketCost; // R1 markup + your 2.5% inside this
+
+  // Breakdown for you:
+  const ecoCashLossUsd = usdToSend - usdWanted; // $1.52
+  const skyieCutRand = usdWanted * Skyie_Fee * SELL_RATE; // Your 2.5% fee e.g. $100*0.025*R18.5 = R46.25
+  return {
+    marketRate: MARKET_RATE,
+    sellRate: SELL_RATE,
+    usdWanted, // receiver gets clean
+    usdToSend: Number(usdToSend.toFixed(2)), // YOU send this via AT
+    customerPaysRand: Number(totalRand.toFixed(2)),
+    profitRand: Number(totalProfitRand.toFixed(2)),
+    ecoCashFee: Number(ecoCashLossUsd.toFixed(2)),
+    skyieFeeRand: Number(skyieCutRand.toFixed(2)),
+    message: `Rate: R${SELL_RATE.toFixed(2)}/$1\nPay: R${totalRand.toFixed(2)} for $${usdWanted}\nSend $${usdToSend.toFixed(2)} (EcoCash fee $${ecoCashLossUsd.toFixed(2)})\nProfit: R${totalProfitRand.toFixed(2)} (incl Skyie R${skyieCutRand.toFixed(2)})`
+  };
+}
+
+// === HELPERS ===
+const IS_OWNER = (p) => p === OWNER_NUMBER;
+
+async function sendWhatsApp(to, text){
+  if(!WHATSAPP_TOKEN) return console.log(`[WA] ${to}: ${text}`);
   try{
-    if(!fs.existsSync('auth_info')) return
-    let obj={}
-    fs.readdirSync('auth_info').forEach(f=>{
-      if(f.endsWith('.json')) try{obj[f.replace('.json','')]=JSON.parse(fs.readFileSync(`auth_info/${f}`))}catch{}
-    })
-    await supabase.from('baileys_auth').upsert({id:1, data: obj})
-  }catch{}
+    await fetch(`https://graph.facebook.com/v19.0/${PHONE_ID}/messages`,{
+      method:'POST',
+      headers:{ Authorization:`Bearer ${WHATSAPP_TOKEN}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ messaging_product:'whatsapp', to, type:'text', text:{body:text} })
+    });
+  }catch(e){ console.error('WA fail', e.message); }
 }
-function genKey(name){ return `alveolCloudKey${Math.random().toString(36).slice(2,9)}${Date.now().toString(36)}.${name.replace(/\s+/g,'_')}_Store` }
-
-async function uploadImage(buffer, phone){
-  const fileName = `${phone}_${Date.now()}.jpg`
-  const {error} = await supabase.storage.from('product-images').upload(fileName, buffer, {contentType:'image/jpeg', upsert:true})
-  if(error) throw error
-  const {data: pub} = supabase.storage.from('product-images').getPublicUrl(fileName)
-  return pub.publicUrl
-}
-
-let lastQR=null
-app.get('/',(_,res)=>res.send('Shoppas Bot ALIVE'))
-app.get('/qr', async (_,res)=>{ if(!lastQR) return res.send('✅ Connected'); const img=await QRCode.toDataURL(lastQR); res.send(`<img src="${img}" width="300"/>`) })
-app.listen(process.env.PORT||10000, ()=>console.log('Web running'))
-
-async function cleanOld(){
+async function sendAT(to, message){
   try{
-    const cutoff = Date.now() - NINETY_DAYS
-    const {data} = await supabase.from('stocks').select('id,created_at').limit(1000)
-    const old = (data||[]).filter(r=>{
-      const c = typeof r.created_at==='number' ? r.created_at : new Date(r.created_at).getTime()
-      return c < cutoff
-    })
-    if(old.length){
-      await supabase.from('stocks').delete().in('id', old.map(o=>o.id))
-      console.log(`Deleted ${old.length} expired >90d stocks`)
+    await atSMS.send({ to:[to], message });
+    return true;
+  }catch(e){ console.error('AT fail', e.message); return false; }
+}
+
+// === CREDIT ENGINE ===
+async function getAgent(phone){
+  const {data} = await supabase.from('agents').select('*').eq('phone', phone).single();
+  return data;
+}
+async function addCredits(phone, amountRand){
+  const ag = await getAgent(phone);
+  if(!ag) return null;
+  const rate = ag.use_my_ecocash ? 15 : 10;
+  const creditsToAdd = Math.floor(amountRand / rate);
+  const newBal = (ag.credits||0) + creditsToAdd;
+  await supabase.from('agents').update({ credits:newBal, paused:false }).eq('phone', phone);
+  await sendWhatsApp(phone, `✅ Credited R${amountRand} = ${creditsToAdd} @ R${rate}/tx\nBal: ${newBal}\nBot resumed`);
+  return newBal;
+}
+async function canSend(phone){
+  if(IS_OWNER(phone)) return true;
+  const ag = await getAgent(phone);
+  if(!ag || ag.paused || (ag.credits||0) <=0){
+    await supabase.from('agents').update({ paused:true }).eq('phone', phone);
+    return false;
+  }
+  return true;
+}
+async function deductCredit(phone){
+  if(IS_OWNER(phone)) return { ok:true, left:9999 };
+  const ag = await getAgent(phone);
+  const newBal = (ag.credits||0) -1;
+  await supabase.from('agents').update({ credits:newBal }).eq('phone', phone);
+  if(newBal <=0){
+    await supabase.from('agents').update({ paused:true }).eq('phone', phone);
+    await sendWhatsApp(phone, `⚠️ Last credit used! PAUSED. Top up AGENT-${phone.slice(-4)}`);
+  }
+  return { ok:true, left:newBal };
+}
+
+// === AT QUEUE ENGINE - 5 in 10 mins, 1 per 60s per phone ===
+const SEND_DELAY_MS = 60*1000;
+const MAX_PER_WINDOW = 5;
+const WINDOW_MS = 10*60*1000;
+const queues = new Map();
+
+function getQueue(phone){
+  if(!queues.has(phone)) queues.set(phone, { pending:[], lastSent:0, windowStart:Date.now(), count:0 });
+  return queues.get(phone);
+}
+function queueATSend(senderPhone, atMessage, agentPhone, zpRef, calc){
+  const q = getQueue(senderPhone);
+  q.pending.push({ atMessage, agentPhone, zpRef, calc, enqueued:Date.now() });
+  console.log(`Queued ${zpRef} for ${senderPhone} len ${q.pending.length}`);
+}
+async function processQueues(){
+  for(const [senderPhone, q] of queues.entries()){
+    if(q.pending.length===0) continue;
+    const now = Date.now();
+    if(now - q.windowStart > WINDOW_MS){ q.windowStart = now; q.count = 0; }
+    if(q.count >= MAX_PER_WINDOW) continue;
+    if(now - q.lastSent < SEND_DELAY_MS) continue;
+
+    const job = q.pending.shift();
+    const ok = await sendAT(senderPhone, job.atMessage);
+    if(ok){
+      q.lastSent = now; q.count++;
+      const d = await deductCredit(job.agentPhone);
+      await supabase.from('payments').update({ status:'SENT', sent_amount:job.calc.usdToSend, sent_at:new Date().toISOString() }).eq('zp_ref', job.zpRef);
+      await sendWhatsApp(job.agentPhone, `${job.calc.message}\n✅ Sent ${job.atMessage}\nLeft: ${d.left}\nQueue: ${q.pending.length} | Ref: ${job.zpRef}`);
+      console.log(`Sent ${job.zpRef} to ${senderPhone}`);
+    }else{
+      q.pending.unshift(job);
     }
-  }catch(e){console.log('clean err',e.message)}
+  }
 }
-setInterval(cleanOld, 24*60*60*1000)
+setInterval(processQueues, 15*1000);
 
-async function startBot(){
-  await loadAuth()
-  const {state, saveCreds} = await useMultiFileAuthState('auth_info')
-  const sock = makeWASocket({ auth: state, browser:['Shoppas','Chrome','1.0'], markOnlineOnConnect:false })
-  sock.ev.on('creds.update', async ()=>{ await saveCreds(); await saveAuth() })
-  sock.ev.on('connection.update', u=>{
-    if(u.qr){ lastQR=u.qr }
-    if(u.connection==='close' && u.lastDisconnect?.error?.output?.statusCode!==DisconnectReason.loggedOut) startBot()
-    if(u.connection==='open'){ console.log('BOT CONNECTED'); lastQR=null; cleanOld() }
-  })
-
-  let userFlow={}, searchCount={}
-
-  sock.ev.on('messages.upsert', async ({messages})=>{
-    try{
-      const m=messages[0]
-      if(!m?.message || m.key.fromMe) return
-      const from=m.key.remoteJid
-      if(from.endsWith('@g.us')) return // ignore all groups
-       function cleanPhone(jid){
-       if(!jid) return ''
-       let p = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-       // fix 2637795969660 -> 263779596966 (Baileys adds trailing :0)
-       if(p.length === 13 && p.startsWith('263') && p.endsWith('0')) p = p.slice(0, -1)
-       // fix 0779596966 -> 263779596966
-       if(p.startsWith('0') && p.length >= 10) p = '263' + p.slice(1)
-       // cut to 12 max for ZW
-       if(p.length > 12) p = p.slice(0,12)
-       return p
-     }
-
-      let phone = cleanPhone(from)
-      try{ 
-       const mapped = await sock.signalRepository?.lidMapping?.getPNForLID(from)
-       if(mapped) phone = cleanPhone(mapped)
-     }catch{}
-       if(m.key.participant){
-      try{ 
-       const mp = await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant)
-       phone = cleanPhone(mp||m.key.participant)
-     }catch{ phone = cleanPhone(m.key.participant) }
+// === WEBHOOKS ===
+app.get('/webhook', (req,res)=>{
+  if(req.query['hub.verify_token'] === VERIFY_TOKEN) return res.send(req.query['hub.challenge']);
+  res.sendStatus(403);
+});
+app.post('/webhook', async (req,res)=>{
+  try{
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if(!msg) return res.sendStatus(200);
+    const from = msg.from; const text = msg.text?.body?.trim()||''; const upper = text.toUpperCase();
+    if(upper.startsWith('REGISTER')){
+      const parts = text.split(/\s+/); const fnbEmail = (parts[1]||'').toLowerCase();
+      const useMine = upper.includes('USEMINE'); const phonePart = parts[2]||'';
+      if(!fnbEmail.includes('@')){ await sendWhatsApp(from, 'Format: REGISTER email +26377... OR REGISTER email USEMINE'); return res.sendStatus(200); }
+      const senderPhone = useMine ? YOUR_ZIM_SENDER : (phonePart.includes('263')?phonePart:`+${phonePart}`);
+      await supabase.from('agents').upsert({ phone:from, fnb_email:fnbEmail, sender_phone:senderPhone, use_my_ecocash:useMine, credits:IS_OWNER(from)?9999:0, paused:false }, {onConflict:'phone'});
+      await sendWhatsApp(from, `✅ Registered\nEmail: ${fnbEmail}\nSender: ${senderPhone}\nRate: R${SELL_RATE}/$1\nTop up Ref: AGENT-${from.slice(-4)}`);
+      return res.sendStatus(200);
     }
+    if(upper==='BALANCE'){
+      const ag = await getAgent(from);
+      if(!ag){ await sendWhatsApp(from, 'Not registered'); return res.sendStatus(200); }
+      const q = getQueue(ag.sender_phone);
+      await sendWhatsApp(from, `💰 ${IS_OWNER(from)?'OWNER ∞':(ag.paused?'PAUSED':'ACTIVE')}\nCredits: ${IS_OWNER(from)?'∞':ag.credits}\nRate: R${SELL_RATE}/$1\nQueue for your sender: ${q.pending.length} pending\nSender: ${ag.sender_phone}`);
+      return res.sendStatus(200);
+    }
+    if(upper.startsWith('ADD') && IS_OWNER(from)){
+      const parts = text.split(/\s+/); const target=parts[1]; const amt=parseFloat(parts[2])||0;
+      const bal = await addCredits(target, amt);
+      await sendWhatsApp(from, `Added R${amt} to ${target} -> ${bal}`);
+      return res.sendStatus(200);
+    }
+    if(upper==='RATE'){
+      await sendWhatsApp(from, `Sell R${SELL_RATE}/$1 (Market R${MARKET_RATE}+R1)\n$100 = R${(100*SELL_RATE).toFixed(2)} clean`);
+      return res.sendStatus(200);
+    }
+  }catch(e){ console.error(e); }
+  res.sendStatus(200);
+});
 
-//console.log('CLEAN PHONE:', from, '->', phone)
-
-      let text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || ''
-      text=text.trim()
-      const hasImage=!!m.message.imageMessage
-      const loc=m.message.locationMessage
-      const lower=text.toLowerCase()
-
-      if(loc){
-        userFlow[phone]={...(userFlow[phone]||{}), lat: loc.degreesLatitude, lng: loc.degreesLongitude}
-        const {data: shop} = await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
-        if(shop) await supabase.from('shops').update({lat: loc.degreesLatitude, lng: loc.degreesLongitude}).eq('phone', phone)
-        await sock.sendMessage(from,{text:`📍 Pinned! ${shop?shop.shop_name+' live':'Now .Auth my store'}`})
-        return
-      }
-      if(!text) return
-
-      if(userFlow[phone]?.step){
-        const step=userFlow[phone].step
-        if(step==='shop_name'){ userFlow[phone].tempAuth.shop_name=text; userFlow[phone].step='owner'; return sock.sendMessage(from,{text:`✅ Shop: ${text}\n\n2. Owner full name?`}) }
-        if(step==='owner'){ userFlow[phone].tempAuth.owner=text; userFlow[phone].step='who_adds'; return sock.sendMessage(from,{text:`✅ Owner: ${text}\n\n3. Who adds stock? (You / Cashier)`}) }
-        if(step==='who_adds'){
-          const key=genKey(userFlow[phone].tempAuth.shop_name)
-          const newShop={ phone, shop_name:userFlow[phone].tempAuth.shop_name, owner:userFlow[phone].tempAuth.owner, who_adds:text, wa_link:`https://wa.me/${phone}`, auth_key:key, lat:userFlow[phone]?.lat||null, lng:userFlow[phone]?.lng||null, open_time:'08:00', close_time:'17:00', created_at: Date.now() }
-          await supabase.from('shops').upsert(newShop, {onConflict:'phone'})
-          userFlow[phone]={...userFlow[phone], step:null, tempAuth:null}
-          return sock.sendMessage(from,{text:`🎉 *AUTHENTICATED*\n*${newShop.shop_name}*\nKey: \`${key}\`\n\nNow pin location + ADD with photo\n\nType .manual for rules`})
-        }
-      }
-
-      if(lower==='.auth my store' || lower==='auth my store'){ userFlow[phone]={step:'shop_name', tempAuth:{}, lat:userFlow[phone]?.lat}; return sock.sendMessage(from,{text:`🔐 Shoppas Auth\n1/3 Shop name?`}) }
-
-      if(lower==='.manual' || lower==='manual'){
-        const {data: shop}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
-        const {data: stocks}=await supabase.from('stocks').select('*').eq('phone', phone).order('created_at',{ascending:false}).limit(20)
-        let stockMsg='No stock yet'
-        if(stocks?.length){
-          stockMsg=stocks.map((s,i)=>{
-            const c = typeof s.created_at==='number' ? s.created_at : new Date(s.created_at).getTime()
-            const left=SEVEN_DAYS-(Date.now()-c)
-            const daysLeft=Math.floor(left/(24*60*60*1000))
-            let status= daysLeft>=0? `✅ Active ${daysLeft}d left` : `❌ EXPIRED ${Math.abs(daysLeft)}d ago`
-            return `${i+1}. ${s.display} | ${s.price} | ${status}`
-          }).join('\n')
-        }
-        return sock.sendMessage(from,{text:`📖 *SHoppas MANUAL - How We Work*\n\n*FOR SHOP OWNERS:*\n1. Stock lives 7 DAYS only. After 7 days, it is HIDDEN from buyers (not delet1ed) to keep searches accurate.\n2. You MUST RENEW before buyers see it again.\n   • RENEW -> renews ALL your expired stock\n   • RENEW handbag -> renews that product only\n3. After 90 DAYS without renewal, we DELETE it permanently.\n4. To DELETE: DELETE handbag or DELETE 1\n\n*WHY?*\nWe force daily accuracy. No selling what you sold last week.\n\n*The key alveolCloudKey..._Store is for 3 future things:*\n\n1. *Web dashboard* — when you login at shoppas.com/login, you paste key to prove you own the shop.\n\n2. *If you change number* — you lost phone? You can still claim your old shop with the key: CLAIM alveolCloudKey...\n\n3. *Security* — if someone spoofs your number (rare), we will soon require key for *DELETE ALL* or *RENEW ALL*.\n\n *What to do with it NOW:* \n\n- *Save it* in notes. Don't share.\n- Type *my shop* — it shows your key. Screenshot it.\n- You can ignore it for daily selling — just *ADD*, *my stock*, *RENEW*, *DELETE* works with phone only.\n\n*YOUR SHOP:*\n${shop? `${shop.shop_name}\nOwner: ${shop.owner}\nKey: ${shop.auth_key}` : 'Not authenticated yet'}\n\n*YOUR STOCK:*\n${stockMsg}\n\nCommands: my shop | my stock | RENEW | DELETE | ADD\n`})
-      }
-
-      if(lower==='my shop'){ const {data:s}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle(); if(!s) return sock.sendMessage(from,{text:'No shop. .Auth my store'}); return sock.sendMessage(from,{text:`*${s.shop_name}*\nKey: ${s.auth_key}\n${s.lat?'📍 pinned':'📍 send location'}`}) }
-
-/*      if(lower==='my stock'){
-        const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).order('created_at',{ascending:false}).limit(30)
-        if(!list?.length) return sock.sendMessage(from,{text:'No stock'})
-        let msg=`Your Stock (${list.length}):\n`; list.forEach((s,i)=>{
-          const c = typeof s.created_at==='number' ? s.created_at : new Date(s.created_at).getTime()
-          const left=Math.floor((SEVEN_DAYS-(Date.now()-c))/(24*60*60*1000))
-          msg+=`${i+1}. ${s.display} | ${s.price} | ${left>=0? left+'d left':'EXPIRED'}\n`
-        }); msg+=`\nRENEW or DELETE product`; return sock.sendMessage(from,{text:msg})
-      }*/
-
-if(lower==='my stock'){
-  const {data: shopAcc} = await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
-  const realPhone = shopAcc?.phone || phone
-  let {data:list} = await supabase.from('stocks').select('*').eq('phone', realPhone).order('created_at',{ascending:false}).limit(50)
-  
-  if(!list?.length) return sock.sendMessage(from,{text:'No stock yet. ADD 20kg gas $30'})
-
-  let text = `📦 ${shopAcc?.shop_name || 'MY STOCK'} (${list.length})\n\n`
-  list.forEach((s,i)=>{
-    text += `${i+1}. ${s.display} | $${s.price} | Qty:${s.qty}\n`
-  })
-  text += `\nTo delete: DELETE 1\nTo renew: RENEW ALL`
-
-  const codeBox = "```\n" + text.replace(/```/g,'') + "\n```"
-  return sock.sendMessage(from,{text: codeBox})
+// === FNB SCANNER ===
+function scanFNB(){
+  return new Promise((resolve)=>{
+    const found=[]; if(!FNB_EMAIL) return resolve(found);
+    const imap = new Imap({ user:FNB_EMAIL, password:FNB_PASS, host:FNB_HOST, port:993, tls:true, tlsOptions:{rejectUnauthorized:false} });
+    imap.once('ready', ()=>{
+      imap.openBox('INBOX', false, (err)=>{
+        if(err){ imap.end(); return resolve(found); }
+        imap.search(['UNSEEN', ['FROM','fnb']], (err, results)=>{
+          if(!results?.length){ imap.end(); return resolve(found); }
+          const f = imap.fetch(results, { bodies:'' });
+          f.on('message', (msg)=>{
+            msg.on('body', async (stream)=>{
+              try{
+                const parsed = await simpleParser(stream);
+                const body = `${parsed.subject} ${parsed.text} ${parsed.html||''}`;
+                const amtM = body.match(/R\s?([\d,]+\.?\d*)/);
+                const refM = body.match(/(ZP-\d+-\d+|AGENT-\w+)/i);
+                if(amtM && refM) found.push({ ref:refM[1].toUpperCase(), amt:parseFloat(amtM[1].replace(/,/g,'')) });
+              }catch{}
+            });
+          });
+          f.once('end', ()=>{ imap.end(); resolve(found); });
+          f.once('error', ()=>{ imap.end(); resolve(found); });
+        });
+      });
+    });
+    imap.once('error', ()=> resolve(found));
+    try{ imap.connect(); }catch{ resolve(found); }
+  });
 }
 
-      if(lower.startsWith('delete')){
-        const query=text.slice(6).trim()
-        if(!query) return sock.sendMessage(from,{text:'Use: DELETE handbag or DELETE 1'})
-        let toDel=[]
-        if(!isNaN(query)){
-          const idx=parseInt(query)-1
-          const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).order('created_at',{ascending:false}).limit(30)
-          if(list && list[idx]) toDel=[list[idx]]
-        }else{
-          const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).ilike('item', `%${query}%`)
-          toDel=list||[]
-        }
-        if(!toDel.length) return sock.sendMessage(from,{text:`❌ Nothing found for "${query}"`})
-        for(let s of toDel) await supabase.from('stocks').delete().eq('id', s.id)
-        return sock.sendMessage(from,{text:`🗑️ Deleted ${toDel.length} item(s): ${toDel.map(s=>s.display).join(', ')}`})
+// === PROCESSOR ===
+app.get('/process', async (req,res)=>{
+  if(req.query.key !== PROCESS_SECRET) return res.status(403).send('bad key');
+  const payments = await scanFNB();
+  let log = `FNB ${payments.length} | Market R${MARKET_RATE} Sell R${SELL_RATE}\n`;
+  for(const p of payments){
+    if(p.ref.startsWith('AGENT-')){
+      const suffix = p.ref.split('-')[1];
+      const {data: agents} = await supabase.from('agents').select('*').ilike('phone', `%${suffix}`);
+      const ag = agents?.[0];
+      if(ag){ const bal = await addCredits(ag.phone, p.amt); log+=`Topup ${ag.phone} R${p.amt} -> ${bal}\n`; }
+      continue;
+    }
+    if(p.ref.startsWith('ZP-')){
+      const {data: pay} = await supabase.from('payments').select('*, agents!inner(*)').eq('zp_ref', p.ref).eq('status','PENDING').maybeSingle();
+      if(!pay){ log+=`No pending ${p.ref}\n`; continue; }
+      const ag = pay.agents;
+      if(!await canSend(ag.phone)){
+        await sendWhatsApp(ag.phone, `❌ ${p.ref} R${p.amt} received NO CREDITS. Queue paused. Top up AGENT-${ag.phone.slice(-4)}`);
+        log+=`Blocked ${ag.phone}\n`; continue;
       }
+      const calc = calculateCleanSend(pay.usd_amount);
+      const atMsg = `PAY ${pay.customer_ecocash} ${calc.usdToSend}`;
+      queueATSend(ag.sender_phone, atMsg, ag.phone, p.ref, calc);
+      await supabase.from('payments').update({ status:'QUEUED', fnb_amount:p.amt, queued_at:new Date().toISOString() }).eq('zp_ref', p.ref);
+      log+=`Queued ${atMsg} for ${ag.sender_phone}\n`;
+    }
+  }
+  res.send(log + `\nQueues: ${Array.from(queues.entries()).map(([k,v])=>`${k}:${v.pending.length}`).join(', ')}`);
+});
 
-      if(lower.startsWith('renew')){
-        const query=text.slice(5).trim()
-        const now=Date.now()
-        if(!query){
-          const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone)
-          if(!list?.length) return sock.sendMessage(from,{text:'No stock to renew'})
-          await supabase.from('stocks').update({created_at: now}).eq('phone', phone)
-          return sock.sendMessage(from,{text:`♻️ Renewed ALL (${list.length}) stocks for 7 more days!`})
-        }else{
-          const {data:list}=await supabase.from('stocks').select('*').eq('phone', phone).ilike('item', `%${query}%`)
-          if(!list?.length) return sock.sendMessage(from,{text:`No stock matching "${query}"`})
-          await supabase.from('stocks').update({created_at: now}).ilike('item', `%${query}%`).eq('phone', phone)
-          return sock.sendMessage(from,{text:`♻️ Renewed ${list.length} item(s): ${list.map(s=>s.display).join(', ')} for 7 days`})
-        }
-      }
+app.get('/credit', async (req,res)=>{
+  if(req.query.key !== PROCESS_SECRET) return res.status(403).send('bad');
+  const bal = await addCredits(req.query.phone, parseFloat(req.query.amount)||0);
+  res.send(`Bal ${req.query.phone}: ${bal}`);
+});
 
-      if(lower.startsWith('add')){
-        const lines=text.split('\n').map(l=>l.trim()).filter(l=>l)
-        if(lines.length<4) return sock.sendMessage(from,{text:` incorrect Format:\nADD\nProduct Name\n$Price\nqty number\n+ PHOTO`})
-        const {data: shop}=await supabase.from('shops').select('*').eq('phone', phone).maybeSingle()
-        if(!shop) return sock.sendMessage(from,{text:` Not authenticated. write ".Auth my store"`})
-        const productName=lines[1]; const priceRaw=lines[2]; const qtyRaw=lines[3]
-        if(!priceRaw.includes('$')||!qtyRaw.toLowerCase().includes('qty')) return sock.sendMessage(from,{text:`❌ Line3 $ and Line4 qty required`})
-        if(!hasImage) return sock.sendMessage(from,{text:` Photo required`})
-        try{
-          const buf=await downloadMediaMessage(m,'buffer',{}, { logger:undefined, reuploadRequest: sock.updateMediaMessage })
-          const imageUrl=await uploadImage(buf, phone)
-          // CLEAN price - only $number
-          const cleanPrice = '$' + (priceRaw.match(/\d+/)?.[0] || '0')
-          const cleanQty = qtyRaw.replace(/qty/i,'').trim().match(/\d+/)?.[0] || '1'
-          await supabase.from('stocks').insert({ item: productName.toLowerCase(), display: productName, price: cleanPrice, qty: cleanQty, phone: shop.phone, shop_name: shop.shop_name, wa_link: shop.wa_link, image_url: imageUrl, lat: shop.lat, lng: shop.lng, created_at: Date.now() })
-          return sock.sendMessage(from,{text:`✅ Added *${productName}* | ${cleanPrice}\nExpires in 7 days. Use RENEW to extend.\nType .manual for info`})
-        }catch(e){ return sock.sendMessage(from,{text:`Upload failed: ${e.message}`}) }
-      }
-
-      if(text.length>=2){
-        if(['hi','hello','hey','hii','heyy'].includes(lower)){
-          return sock.sendMessage(from,{text:` Welcome to Shoppas!\n\nSearch like:\n• playstation 5\n• playstation 5 under $450\n• handbag near me\n• iphone under $500 near me\n\nSELL: .Auth my store`})
-        }
-
-        let raw = lower
-        let maxPrice = null
-        let wantNear = raw.includes('near me') || raw.includes('nearby')
-
-        const pricePattern = /(?:under|below|less than|<|budget)\s*\$?\s*(\d+)|\$\s*(\d+)/i
-        const priceMatch = raw.match(pricePattern)
-        if(priceMatch){
-          maxPrice = parseInt(priceMatch[1] || priceMatch[2])
-        }
-
-        //raw = raw.replace(/(?:under|below|less than|<|budget)\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?/gi,'').trim()
-        raw = raw.replace(/(?:for\s*)?(?:under|below|less than|<|budget)?\s*\$?\s*\d+\s*(?:dollars|usd|max)?|\$\s*\d+\s*(?:max|dollars|usd)?|for/gi,'').trim()
-        raw = raw.replace(/near me|nearby/gi,'').trim()
-        const search = raw.replace(/\s+/g,' ').trim()
-
-        console.log(`PARSED: "${lower}" -> product="${search}" max=$${maxPrice} near=${wantNear}`)
-
-        if(search.length<2) return
-
-        searchCount[phone]=(searchCount[phone]||0)+1
-
-        // FIXED: No gte in supabase, filter in JS to support both bigint and timestamp
-        const {data: like}=await supabase.from('stocks').select('*').ilike('item', `%${search}%`).limit(40)
-        let found=(like||[]).filter(s=>{
-          const c = typeof s.created_at==='number' ? s.created_at : new Date(s.created_at).getTime()
-          const age = Date.now() - c
-          if(age > SEVEN_DAYS) return false
-          const numSearch=search.match(/\d+/)?.[0]; const numItem=s.item.match(/\d+/)?.[0]
-          if(numSearch && numItem && numSearch!==numItem) return false
-          return true
-        })
-
-        // If no like, try exact
-        if(found.length===0){
-          const {data: exact}=await supabase.from('stocks').select('*').eq('item', search).limit(20)
-          found=(exact||[]).filter(s=>{
-            const c = typeof s.created_at==='number' ? s.created_at : new Date(s.created_at).getTime()
-            return (Date.now()-c) <= SEVEN_DAYS
-          })
-        }
-
-        // FIXED PRICE FILTER: take first number only, not all digits
-        if(maxPrice && found.length){
-          found = found.filter(s=>{
-            const m = String(s.price||'').match(/(\d+)/)
-            const p = m ? parseInt(m[1]) : 999999
-            return p <= maxPrice
-          })
-        }
-
-        if(wantNear && found.length && userFlow[phone]?.lat){
-          const {lat:ulat, lng:ulng} = userFlow[phone]
-          const dist = (la1,lo1,la2,lo2)=>{
-            const R=6371; const dLat=(la2-la1)*Math.PI/180; const dLon=(lo2-lo1)*Math.PI/180;
-            const a=Math.sin(dLat/2)**2 + Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dLon/2)**2
-            return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-          }
-          found = found.sort((a,b)=>{
-            if(!a.lat||!b.lat) return 0
-            return dist(ulat,ulng,a.lat,a.lng) - dist(ulat,ulng,b.lat,b.lng)
-          })
-        }
-
-        if(found.length){
-          const toShow = wantNear ? found.slice(0,10) : found.slice(0,15)
-          for(let s of toShow){
-           // const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} ``\n  Qty: ${s.qty}\n📞 ${s.wa_link}\n${wantNear && s.lat? '📍 CLOSEST FIRST':''}`
-            const caption=`*${s.shop_name}*\n📦 ${s.display.toUpperCase()}\n💰 ${s.price} \n  Qty: ${s.qty}\n ${s.wa_link}\n${wantNear && s.lat ? '📍 CLOSEST FIRST' : ''}`
-            if(s.image_url) await sock.sendMessage(from,{image:{url:s.image_url}, caption})
-            else await sock.sendMessage(from,{text:caption})
-            if(s.lat) await sock.sendMessage(from,{location:{degreesLatitude:s.lat, degreesLongitude:s.lng}})
-          }
-          if(wantNear && !userFlow[phone]?.lat){
-            await sock.sendMessage(from,{text:`📍 Send your location to sort by nearest! Tap 📎 > Location`})
-          }
-        }else{
-          let reply=`*${text}* not available${maxPrice?` under $${maxPrice}`:''}\n\n.\nTry: "${search}"`
-          if(searchCount[phone]%5===0) reply+=`\n\n🔥 Share: wa.me/263775735964`
-          await sock.sendMessage(from,{text:reply})
-        }
-      }
-    }catch(e){ console.log('HANDLER ERROR:', e.message, e.stack) }
-  })
-}
-startBot()
+app.get('/', (req,res)=> res.send(`v3 Live Market R${MARKET_RATE} Sell R${SELL_RATE} Queue ON`));
+app.listen(process.env.PORT||10000, ()=> console.log('v3 ESM Queue Live'));
