@@ -138,7 +138,7 @@ async function startBot(){
     if(u.connection==='close' && u.lastDisconnect?.error?.output?.statusCode!==DisconnectReason.loggedOut) startBot()
     if(u.connection==='open'){ console.log('CONNECTED ✅'); lastQR=null }
   })
-  sock.ev.on('messages.upsert', async ({messages})=>{
+/*  sock.ev.on('messages.upsert', async ({messages})=>{
     try{
       const m=messages[0]; if(!m?.message||m.key.fromMe) return
       const from=m.key.remoteJid; if(from.endsWith('@g.us')) return
@@ -192,6 +192,61 @@ async function startBot(){
       }
 
     }catch(e){console.log(e.message)}
+  })*/
+  sock.ev.on('messages.upsert', async ({messages})=>{
+    try{
+      const m=messages[0]; if(!m?.message||m.key.fromMe) return
+      const from=m.key.remoteJid; if(from.endsWith('@g.us')) return
+      let phone=cleanPhone(from)
+      const text=m.message.conversation||m.message.extendedTextMessage?.text||m.message.imageMessage?.caption||''; 
+      if(!text) return
+      console.log(`IN: ${phone} => ${text}`)
+      
+      // ALWAYS reply something to confirm bot alive
+      const upper=text.trim().toUpperCase()
+
+      // DEBUG: just reply if pay
+      if(upper.includes('PAY') || /^\d+\s+0/.test(text.trim())){
+        try{
+          let usd, eco
+          const parts=text.trim().split(/\s+/)
+          if(upper.startsWith('PAY')){ usd=parseFloat(parts[1]); eco=parts[2] } 
+          else { usd=parseFloat(parts[0]); eco=parts[1] }
+          
+          if(!usd || !eco){
+            await sendWA(phone, `Format: 100 0771234567\nYou sent: ${text}`)
+            return
+          }
+
+          const calc=calculate(usd)
+          const ref=genRef()
+          
+          const {error} = await supabase.from('payments').insert({ 
+            zp_ref:ref, 
+            usd_amount:usd, 
+            customer_ecocash:eco, 
+            customer_phone:phone,
+            status:'PENDING', 
+            created_at:new Date().toISOString() 
+          })
+          if(error){ console.log('DB error', error); await sendWA(phone, `DB Error: ${error.message}`); return }
+
+          const msg=`💸 *Remii*\n\nYou send: $${usd} to ${eco}\nPay: *R${calc.rand}*\n\nBank: ${BANK_NAME}\nName: ${FNB_ACCOUNT_NAME}\nAcc: ${FNB_ACCOUNT_NUMBER}\nRef: *${ref}*\n\nRate R${SELL_RATE}`
+          
+          console.log(`OUT: ${msg}`)
+          await sendWA(phone, msg)
+        }catch(e){
+          console.log('PAY error', e)
+          await sendWA(phone, `Error: ${e.message}`)
+        }
+        return
+      }
+
+      if(upper==='RATE' || upper==='HI' || upper==='HELLO'){
+        await sendWA(phone, `Remii alive. Send: 100 0771234567\nRate R${SELL_RATE}`)
+      }
+
+    }catch(e){console.log('main handler',e)}
   })
 }
 startBot()
