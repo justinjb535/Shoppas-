@@ -17,19 +17,22 @@ const {
   OWNER_NUMBER,
   FNB_EMAIL, FNB_PASS,
   FNB_HOST = 'imap.gmail.com',
-  PROCESS_SECRET
+  PROCESS_SECRET,
+  FNB_ACCOUNT_NAME = 'YOUR NAME',
+  FNB_ACCOUNT_NUMBER = '123456789',
+  FNB_BRANCH = '250655',
+  BANK_NAME = 'FNB'
 } = process.env
 
-// === AUTH SAVE TO SUPABASE (no disk needed) ===
+// Auth to Supabase
 async function loadAuth(){
   try{
     const {data} = await supabase.from('baileys_auth').select('data').eq('id',1).single()
     if(data?.data && Object.keys(data.data).length>0){
       if(!fs.existsSync('auth_info')) fs.mkdirSync('auth_info')
       for(let k in data.data) fs.writeFileSync(`auth_info/${k}.json`, JSON.stringify(data.data[k]))
-      console.log('✅ Auth loaded from Supabase')
     }
-  }catch(e){ console.log('loadAuth', e.message) }
+  }catch{}
 }
 async function saveAuth(){
   try{
@@ -42,132 +45,59 @@ async function saveAuth(){
   }catch{}
 }
 
-// === RATE ===
-let MARKET_RATE = 17.50
-const MARKUP = 1.00
-const ECOCASH_FEE = 0.015
-const Skyie_Fee = 0.025
-let SELL_RATE = MARKET_RATE + MARKUP
-
+// RATE
+let MARKET_RATE=17.50, SELL_RATE=18.50
+const ECOCASH_FEE=0.015
 async function fetchRate(){
   try{
-    const r = await fetch('https://open.er-api.com/v6/latest/USD')
-    const j = await r.json()
-    if(j.rates?.ZAR){
-      MARKET_RATE = Number(j.rates.ZAR)
-      SELL_RATE = MARKET_RATE + MARKUP
-      await supabase.from('settings').upsert({ key:'usd_zar_rate', value:MARKET_RATE, sell_rate:SELL_RATE }, {onConflict:'key'})
-      console.log(`Rate Market R${MARKET_RATE} Sell R${SELL_RATE}`)
-    }
+    const r=await fetch('https://open.er-api.com/v6/latest/USD')
+    const j=await r.json()
+    if(j.rates?.ZAR){ MARKET_RATE=Number(j.rates.ZAR); SELL_RATE=MARKET_RATE+1; }
   }catch{}
 }
-setInterval(fetchRate, 24*60*60*1000)
-fetchRate()
+setInterval(fetchRate, 24*60*60*1000); fetchRate()
+function calculate(usd){ const rand=usd*SELL_RATE; const toSend=usd/(1-ECOCASH_FEE); return {rand: Number(rand.toFixed(2)), toSend: Number(toSend.toFixed(2))} }
+function genRef(){ return `ZP-${Date.now().toString().slice(-6)}-${Math.floor(100+Math.random()*899)}` }
 
-function calculateCleanSend(usdWanted){
-  const totalRand = usdWanted * SELL_RATE
-  const usdToSend = usdWanted / (1 - ECOCASH_FEE)
-  const marketCost = usdToSend * MARKET_RATE
-  const profit = totalRand - marketCost
-  return {
-    usdWanted,
-    usdToSend: Number(usdToSend.toFixed(2)),
-    customerPaysRand: Number(totalRand.toFixed(2)),
-    profitRand: Number(profit.toFixed(2)),
-    message: `Rate R${SELL_RATE.toFixed(2)}/$1 (Market R${MARKET_RATE.toFixed(2)}+R1)\nSA pays R${totalRand.toFixed(2)} for $${usdWanted} ZIM clean`
-  }
-}
-function genZPRef(){
-  const t = Date.now().toString().slice(-6)
-  const r = Math.floor(100+Math.random()*899)
-  return `ZP-${t}-${r}`
-}
+// BAILEYS
+let sock=null, lastQR=null
+function toJid(p){ return `${p.replace(/[^0-9]/g,'')}@s.whatsapp.net` }
+function cleanPhone(j){ if(!j) return ''; let p=j.split('@')[0].split(':')[0].replace(/[^0-9]/g,''); if(p.length===13&&p.startsWith('263')&&p.endsWith('0')) p=p.slice(0,-1); if(p.startsWith('0')) p='263'+p.slice(1); if(p.length>12) p=p.slice(0,12); return `+${p}` }
+async function sendWA(to,txt){ try{ if(!sock) return false; await sock.sendMessage(toJid(to),{text:txt}); return true }catch{ return false } }
 
-// === BAILEYS CORE ===
-let sock=null
-let lastQR=null
-function toJid(phone){ return `${phone.replace(/[^0-9]/g,'')}@s.whatsapp.net` }
-function cleanPhone(jid){
-  if(!jid) return ''
-  let p = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g,'')
-  if(p.length===13 && p.startsWith('263') && p.endsWith('0')) p=p.slice(0,-1)
-  if(p.startsWith('0') && p.length>=10) p='263'+p.slice(1)
-  if(p.length>12) p=p.slice(0,12)
-  return `+${p}`
-}
-async function sendWhatsApp(to, text){
-  try{
-    if(!sock) return false
-    await sock.sendMessage(toJid(to), { text })
-    return true
-  }catch(e){ console.log('WA fail', e.message); return false }
-}
-async function getAgent(phone){
-  const {data} = await supabase.from('agents').select('*').eq('phone', phone).single()
-  return data
-}
-async function addCredits(phone, amountRand){
-  const ag = await getAgent(phone)
-  if(!ag) return null
-  const rate = ag.use_my_ecocash ? 15 : 10
-  const creditsToAdd = Math.floor(amountRand / rate)
-  const newBal = (ag.credits||0) + creditsToAdd
-  await supabase.from('agents').update({ credits:newBal, paused:false }).eq('phone', phone)
-  await sendWhatsApp(phone, `✅ Credited R${amountRand} = ${creditsToAdd} credits @ R${rate}/tx\nBal: ${newBal}\nBot resumed`)
-  return newBal
-}
-async function canSend(phone){ if(phone===OWNER_NUMBER) return true; const ag=await getAgent(phone); return ag && !ag.paused && (ag.credits||0)>0 }
-async function deductCredit(phone){
-  if(phone===OWNER_NUMBER) return {left:9999}
-  const ag=await getAgent(phone)
-  const newBal=(ag.credits||0)-1
-  await supabase.from('agents').update({ credits:newBal }).eq('phone', phone)
-  if(newBal<=0){
-    await supabase.from('agents').update({ paused:true }).eq('phone', phone)
-    await sendWhatsApp(phone, `⚠️ Last credit used! PAUSED. Top up AGENT-${phone.slice(-4)}`)
-  }
-  return {left:newBal}
-}
-
-// === QUEUE - MULTI TENANT ===
 const queues=new Map()
-function getQueue(k){ if(!queues.has(k)) queues.set(k,{pending:[],lastSent:0,windowStart:Date.now(),count:0}); return queues.get(k) }
-function queueWASend(queueKey, executorWhatsApp, waMessage, agentPhone, zpRef, calc, useMine){
-  const q=getQueue(queueKey); q.pending.push({executorWhatsApp,waMessage,agentPhone,zpRef,calc,useMine}); console.log(`Queued ${zpRef} -> ${executorWhatsApp} useMine=${useMine}`)
-}
+function getQ(k){ if(!queues.has(k)) queues.set(k,{pending:[],lastSent:0}); return queues.get(k) }
+
 async function processQueues(){
   for(const [k,q] of queues.entries()){
     if(!q.pending.length) continue
-    const now=Date.now()
-    if(now-q.windowStart>10*60*1000){q.windowStart=now;q.count=0}
-    if(q.count>=5) continue
-    if(now-q.lastSent<60*1000) continue
+    if(Date.now()-q.lastSent<60*1000) continue
     const job=q.pending.shift()
-    const ok=await sendWhatsApp(job.executorWhatsApp, job.waMessage)
+    const waMsg=`PAY ${job.eco} ${job.calc.toSend} - Ref ${job.ref}`
+    const ok=await sendWA(k, waMsg)
     if(ok){
-      q.lastSent=now;q.count++
-      const d=await deductCredit(job.agentPhone)
-      await supabase.from('payments').update({status:'SENT', sent_amount:job.calc.usdToSend, sent_at:new Date().toISOString()}).eq('zp_ref',job.zpRef)
-      if(job.useMine) await sendWhatsApp(job.agentPhone, `${job.calc.message}\n✅ Sent by OWNER\nRef:${job.zpRef}\nLeft:${d.left}`)
-      else await sendWhatsApp(job.agentPhone, `${job.calc.message}\n✅ Sent to YOUR EcoCash ${job.executorWhatsApp}\nRef:${job.zpRef}\nLeft:${d.left}`)
-    }else q.pending.unshift(job)
+      q.lastSent=Date.now()
+      await supabase.from('payments').update({status:'SENT', sent_amount:job.calc.toSend, sent_at:new Date().toISOString()}).eq('zp_ref',job.ref)
+      // Notify customer that money sent
+      await sendWA(job.customerPhone, `✅ *SENT!* R${job.calc.rand} received\n$${job.usd} clean sent to ${job.eco}\nRef: ${job.ref}\nZIM gets it in <2 mins via EcoCash`)
+      console.log(`Sent ${job.ref} ${waMsg}`)
+    } else q.pending.unshift(job)
   }
 }
-setInterval(processQueues,15*1000)
+setInterval(processQueues, 10*1000)
 
-// === FNB SCANNER ===
+// FNB SCAN
 function scanFNB(){
   return new Promise((resolve)=>{
     const found=[]; if(!FNB_EMAIL) return resolve(found)
     const imap=new Imap({user:FNB_EMAIL,password:FNB_PASS,host:FNB_HOST,port:993,tls:true,tlsOptions:{rejectUnauthorized:false}})
     imap.once('ready',()=>{
-      imap.openBox('INBOX',false,(err)=>{
-        if(err){imap.end();return resolve(found)}
-        imap.search(['UNSEEN',['FROM','fnb']],(err,results)=>{
+      imap.openBox('INBOX',false,()=>{
+        imap.search(['UNSEEN',['FROM','fnb']],(e,results)=>{
           if(!results?.length){imap.end();return resolve(found)}
           const f=imap.fetch(results,{bodies:''})
-          f.on('message',(msg)=>{msg.on('body',async(s)=>{try{const p=await simpleParser(s);const b=`${p.subject} ${p.text} ${p.html||''}`;const amt=b.match(/R\s?([\d,]+\.?\d*)/);const ref=b.match(/(ZP-\d+-\d+|AGENT-\w+)/i);if(amt&&ref)found.push({ref:ref[1].toUpperCase(),amt:parseFloat(amt[1].replace(/,/g,''))})}catch{}})})
-          f.once('end',()=>{imap.end();resolve(found)});f.once('error',()=>{imap.end();resolve(found)})
+          f.on('message',(msg)=>{msg.on('body',async(s)=>{try{const p=await simpleParser(s);const b=`${p.subject} ${p.text} ${p.html||''}`;const amt=b.match(/R\s?([\d,]+\.?\d*)/);const ref=b.match(/(ZP-\d+-\d+)/i);if(amt&&ref)found.push({ref:ref[1].toUpperCase(),amt:parseFloat(amt[1].replace(/,/g,''))})}catch{}})})
+          f.once('end',()=>{imap.end();resolve(found)}); f.once('error',()=>{imap.end();resolve(found)})
         })
       })
     })
@@ -176,106 +106,92 @@ function scanFNB(){
   })
 }
 
-// === WEB ===
-app.get('/',(_,res)=>res.send(`v6 LIVE Rate R${SELL_RATE} Baileys ${sock?'✅':'❌'} <a href="/qr">/qr</a>`))
-app.get('/qr', async (_,res)=>{ if(!lastQR) return res.send('✅ Connected'); const img=await QRCode.toDataURL(lastQR); res.send(`<h1>Scan with WhatsApp > Linked Devices</h1><img src="${img}" width="350"/>`) })
-
+// WEB
+app.get('/',(_,res)=>res.send(`Remii LIVE Rate R${SELL_RATE} <a href="/qr">QR</a>`))
+app.get('/qr', async (_,res)=>{ if(!lastQR) return res.send('✅ Connected'); const img=await QRCode.toDataURL(lastQR); res.send(`<img src="${img}" width="350"/>`) })
 app.get('/process', async (req,res)=>{
-  if(req.query.key!==PROCESS_SECRET) return res.status(403).send('bad key')
-  const payments=await scanFNB()
-  let log=`FNB found ${payments.length} | Rate R${SELL_RATE}\n`
-  for(const p of payments){
-    if(p.ref.startsWith('AGENT-')){
-      const suffix=p.ref.split('-')[1]
-      const {data:agents}=await supabase.from('agents').select('*').ilike('phone',`%${suffix}`)
-      const ag=agents?.[0]; if(ag){const bal=await addCredits(ag.phone,p.amt); log+=`Topup ${ag.phone} R${p.amt} -> ${bal}\n`}
-      continue
-    }
-    if(p.ref.startsWith('ZP-')){
-      const {data:pay}=await supabase.from('payments').select('*, agents!inner(*)').eq('zp_ref',p.ref).eq('status','PENDING').maybeSingle()
-      if(!pay){log+=`No pending ${p.ref}\n`;continue}
-      const ag=pay.agents
-      if(!await canSend(ag.phone)){await sendWhatsApp(ag.phone,`❌ ${p.ref} NO CREDITS`);log+=`Blocked ${ag.phone}\n`;continue}
-      const calc=calculateCleanSend(pay.usd_amount)
-      const waMsg=`PAY ${pay.customer_ecocash} ${calc.usdToSend} - Ref ${p.ref}`
-      const useMine=ag.use_my_ecocash
-      let executorWhatsApp, queueKey
-      if(useMine){ executorWhatsApp=OWNER_NUMBER; queueKey=YOUR_ZIM_SENDER }
-      else { executorWhatsApp=ag.sender_phone; queueKey=ag.sender_phone }
-      queueWASend(queueKey, executorWhatsApp, waMsg, ag.phone, p.ref, calc, useMine)
-      await supabase.from('payments').update({status:'QUEUED', fnb_amount:p.amt, queued_at:new Date().toISOString()}).eq('zp_ref',p.ref)
-      log+=`Queued ${waMsg} -> ${executorWhatsApp} useMine=${useMine}\n`
-    }
+  if(req.query.key!==PROCESS_SECRET) return res.status(403).send('bad')
+  const pays=await scanFNB()
+  let log=`FNB ${pays.length}\n`
+  for(const p of pays){
+    const {data: pay} = await supabase.from('payments').select('*').eq('zp_ref',p.ref).eq('status','PENDING').maybeSingle()
+    if(!pay){log+=`No pending ${p.ref}\n`;continue}
+    const calc=calculate(pay.usd_amount)
+    // Queue to YOUR_ZIM_SENDER - MacroDroid phone will catch PAY message and auto EcoCash
+    const q=getQ(YOUR_ZIM_SENDER)
+    q.pending.push({ref:p.ref, eco:pay.customer_ecocash, usd:pay.usd_amount, customerPhone:pay.customer_phone, calc})
+    await supabase.from('payments').update({status:'QUEUED', fnb_amount:p.amt, queued_at:new Date().toISOString()}).eq('zp_ref',p.ref)
+    log+=`Queued ${p.ref} -> ${YOUR_ZIM_SENDER} PAY ${pay.customer_ecocash} ${calc.toSend}\n`
   }
-  res.send(log + `\nQueues: ${Array.from(queues.entries()).map(([k,v])=>`${k}:${v.pending.length}`).join(', ')}`)
+  res.send(log)
 })
+app.listen(process.env.PORT||10000)
 
-app.listen(process.env.PORT||10000, ()=>console.log('Web running'))
-
-// === BOT START ===
+// BOT
 async function startBot(){
   await loadAuth()
   const {state, saveCreds}=await useMultiFileAuthState('auth_info')
-  sock=makeWASocket({ auth: state, browser:['EcoCash Bot','Chrome','1.0'], markOnlineOnConnect:false })
+  sock=makeWASocket({ auth: state, browser:['Remii','Chrome','1.0'], markOnlineOnConnect:false })
   sock.ev.on('creds.update', async ()=>{ await saveCreds(); await saveAuth() })
   sock.ev.on('connection.update', u=>{
-    if(u.qr){ lastQR=u.qr; console.log('QR READY -> /qr') }
+    if(u.qr){ lastQR=u.qr }
     if(u.connection==='close' && u.lastDisconnect?.error?.output?.statusCode!==DisconnectReason.loggedOut) startBot()
-    if(u.connection==='open'){ console.log('BOT CONNECTED ✅'); lastQR=null }
+    if(u.connection==='open'){ console.log('CONNECTED ✅'); lastQR=null }
   })
-
   sock.ev.on('messages.upsert', async ({messages})=>{
     try{
-      const m=messages[0]; if(!m?.message || m.key.fromMe) return
+      const m=messages[0]; if(!m?.message||m.key.fromMe) return
       const from=m.key.remoteJid; if(from.endsWith('@g.us')) return
       let phone=cleanPhone(from)
-      try{ const mp=await sock.signalRepository?.lidMapping?.getPNForLID(from); if(mp) phone=cleanPhone(mp) }catch{}
-      if(m.key.participant){ try{ const mp2=await sock.signalRepository?.lidMapping?.getPNForLID(m.key.participant); phone=cleanPhone(mp2||m.key.participant) }catch{ phone=cleanPhone(m.key.participant) } }
+      const text=m.message.conversation||m.message.extendedTextMessage?.text||''; if(!text) return
+      const upper=text.trim().toUpperCase()
+      console.log(`${phone}: ${text}`)
 
-      const text=m.message.conversation||m.message.extendedTextMessage?.text||''
-      const upper=text.trim().toUpperCase(); if(!upper) return
-      console.log(`WA ${phone}: ${text}`)
-
-      // REGISTER
-      if(upper.startsWith('REGISTER')){
-        const parts=text.split(/\s+/); const email=(parts[1]||'').toLowerCase(); const useMine=upper.includes('USEMINE'); const p2=parts[2]||''
-        if(!email.includes('@')) return sendWhatsApp(phone,'Format: REGISTER email USEMINE  OR  REGISTER email +27712345678')
-        const senderPhone=useMine? YOUR_ZIM_SENDER : (p2.startsWith('+')?p2:`+${p2.replace(/[^0-9]/g,'')}`)
-        await supabase.from('agents').upsert({ phone, fnb_email:email, sender_phone:senderPhone, use_my_ecocash:useMine, credits: phone===OWNER_NUMBER?9999:0, paused:false }, {onConflict:'phone'})
-        return sendWhatsApp(phone,`✅ Registered\nEmail:${email}\nSender:${senderPhone}\nMode:${useMine?'MY EcoCash (I send)':'YOUR EcoCash'}\nRef for topup: AGENT-${phone.slice(-4)}\n\nNow send: PAY 100 0771234567 to create order`)
-      }
-
-      if(upper==='BALANCE'){ const ag=await getAgent(phone); if(!ag) return sendWhatsApp(phone,'Not registered'); const q=getQueue(ag.sender_phone); return sendWhatsApp(phone,`💰 ${phone===OWNER_NUMBER?'OWNER ∞':ag.paused?'PAUSED':'ACTIVE'}\nCredits:${phone===OWNER_NUMBER?'∞':ag.credits}\nRate:R${SELL_RATE}\nSender:${ag.sender_phone}\nQueue:${q.pending.length}`) }
-      if(upper==='RATE') return sendWhatsApp(phone,`Rate: R${SELL_RATE}/$1\nSA customer pays R${SELL_RATE} per $1 ZIM clean\n$50 = R${(50*SELL_RATE).toFixed(2)}\n$100 = R${(100*SELL_RATE).toFixed(2)}`)
-      if(upper.startsWith('ADD') && phone===OWNER_NUMBER){ const parts=text.split(/\s+/); const tgt=parts[1]; const amt=parseFloat(parts[2])||0; const bal=await addCredits(tgt,amt); return sendWhatsApp(phone,`Added R${amt} to ${tgt} -> ${bal}`) }
-
-      // === CREATE REF - SA CUSTOMER FLOW ===
-      if(upper.startsWith('PAY ') || (!isNaN(upper.split(' ')[0]) && text.match(/07|263/))){
+      // CUSTOMER FLOW - ANYONE can do PAY
+      // Customer sends: 100 0771234567  OR  PAY 100 0771234567
+      if(text.match(/\d+/) && text.match(/07|263|77/)){
         let usd, eco
         const parts=text.trim().split(/\s+/)
-        if(upper.startsWith('PAY')){ usd=parseFloat(parts[1]); eco=parts[2] } else { usd=parseFloat(parts[0]); eco=parts[1] }
-        if(!usd || !eco){ return sendWhatsApp(phone,`❌ Use:\nPAY 100 0771234567\n\nSA customer pays RAND, ZIM gets $${usd||'100'} EcoCash clean`) }
-        const ag=await getAgent(phone); if(!ag) return sendWhatsApp(phone,'Not registered. REGISTER first')
-        if(!await canSend(phone)) return sendWhatsApp(phone,`❌ NO CREDITS. Top up AGENT-${phone.slice(-4)}`)
-        const calc=calculateCleanSend(usd)
-        const ref=genZPRef()
-        await supabase.from('payments').insert({ zp_ref:ref, usd_amount:usd, customer_ecocash:eco, agent_phone:phone, status:'PENDING', created_at:new Date().toISOString() })
-        const msg=`✅ *ORDER CREATED - SA -> ZIM*\n\n`+
-        `Ref: *${ref}*\n`+
-        `SA Customer Pays: *R${calc.customerPaysRand}* (FNB)\n`+
-        `ZIM Receiver Gets: *$${usd} clean* EcoCash on ${eco}\n`+
-        `You will send: $${calc.usdToSend} (covers 1.5% fee)\n`+
-        `Rate: R${SELL_RATE}/$1\n`+
-        `Profit: R${calc.profitRand}\n\n`+
-        `*TELL SA CUSTOMER:*\n`+
-        `Bank: FNB\n`+
-        `Amount: R${calc.customerPaysRand}\n`+
+        if(upper.startsWith('PAY')){ usd=parseFloat(parts[1]); eco=parts[2] } 
+        else { usd=parseFloat(parts[0]); eco=parts[1] }
+        if(!usd || !eco) return sendWA(phone, `Send like:\n100 0771234567\n\nMeaning $100 to 0771234567 ZIM`)
+
+        const calc=calculate(usd)
+        const ref=genRef()
+        await supabase.from('payments').insert({ 
+          zp_ref:ref, 
+          usd_amount:usd, 
+          customer_ecocash:eco, 
+          customer_phone:phone,
+          status:'PENDING', 
+          created_at:new Date().toISOString() 
+        })
+
+        const msg=`💸 *Remii - SA to ZIM Instant*\n\n`+
+        `You send: *$${usd} clean* to *${eco}* (ZIM)\n`+
+        `Rate: R${SELL_RATE}/$1 (R1 + 2.5% incl)\n`+
+        `Pay: *R${calc.rand}*\n\n`+
+        `*BANK TO PAY (FNB):*\n`+
+        `Bank: ${BANK_NAME}\n`+
+        `Name: ${FNB_ACCOUNT_NAME}\n`+
+        `Acc: ${FNB_ACCOUNT_NUMBER}\n`+
+        `Branch: ${FNB_BRANCH}\n`+
+        `Amount: R${calc.rand}\n`+
         `Reference: *${ref}*\n\n`+
-        `After FNB payment, bot auto sends EcoCash in 5 mins.`
-        return sendWhatsApp(phone,msg)
+        `⚡ After payment, ZIM gets money in <15 mins automatically\n`+
+        `Send proof? Not needed, we auto-detect FNB`
+
+        await sendWA(phone, msg)
+        return
       }
 
-    }catch(e){console.log('handler',e.message)}
+      if(upper==='RATE') return sendWA(phone, `Remii Rate R${SELL_RATE}/$1\n$100 = R${(100*SELL_RATE).toFixed(2)}\nSA RAND -> ZIM USD clean`)
+
+      if(upper.startsWith('REGISTER')){
+        return sendWA(phone, `You are owner? Set env YOUR_ZIM_SENDER and FNB_EMAIL in .env\nCustomers don't need REGISTER, just send: 100 0771234567`)
+      }
+
+    }catch(e){console.log(e.message)}
   })
 }
 startBot()
