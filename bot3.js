@@ -78,18 +78,14 @@ async function sendBidsToRider(sock, ride) {
 
 // Track timers so we don't send bids twice for same ride
 const bidTimers = new Map();
-
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth');
   const sock = makeWASocket({
     auth: state,
-//    logger: { level: 'silent', child: () => ({ level: 'silent' }) },
-  const sock = makeWASocket({
-  auth: state,
-  logger: pino({ level: 'silent' }),
-  syncFullHistory: false,
-  markOnlineOnConnect: false,
-  generateHighQualityLinkPreview: false,
+    logger: pino({ level: 'silent' }),
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    generateHighQualityLinkPreview: false,
     shouldIgnoreJid: (jid) => {
       if (jid.endsWith('@broadcast')) return true;
       if (jid.endsWith('@g.us')) return true;
@@ -372,8 +368,6 @@ async function start() {
       if (!rideId || !answer) { await send(`Use: ANSWER 123456 I'm in red jacket`); return; }
       const { data: ride } = await supabase.from('rides').select('*').eq('id', rideId).single();
       if (!ride || !ride.driver) { await send(`Ride not found or driver not picked yet.`); return; }
-//      try {
-  //      await sock.sendMessage(ride.driver + '@s.whatsapp.net', { text: `${BOT_NAME}: Rider answers:\n"${answer}
      try {
         await sock.sendMessage(ride.driver + '@s.whatsapp.net', { text: `${BOT_NAME}: Rider answers:\n"${answer}"\n\nTrip: ${ride.ride_text}` });
         await send(`Sent to driver ✅`);
