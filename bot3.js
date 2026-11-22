@@ -1,7 +1,7 @@
 // Nditori - WhatsApp Ride Bot - FINAL - Supabase + Bidding + Safety
 // Run: npm install && node index.js
 import 'dotenv/config';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+//import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import pino from 'pino';
@@ -55,6 +55,37 @@ app.get('/status', (req, res) => res.json({ status: connectionStatus, hasQR: !!l
 app.listen(3000, () => console.log('Web server on 3000'));
 
 // =============================================
+async function useSupabaseAuthState() {
+  // Load
+  const { data } = await supabase.from('whatsapp_auth').select('*');
+  let creds = null;
+  let keys = {};
+  if (data) {
+    for (const row of data) {
+      if (row.id === 'creds') creds = row.data;
+      else keys[row.id] = row.data;
+    }
+  }
+  const state = {
+    creds: creds || {},
+    keys: {
+      get: (type, ids) => {
+        const out = {};
+        for (const id of ids) if (keys[`${type}-${id}`]) out[id] = keys[`${type}-${id}`];
+        return out;
+      },
+      set: (data) => {
+        for (const type in data) for (const id in data[type]) keys[`${type}-${id}`] = data[type][id];
+      }
+    }
+  };
+  const saveCreds = async () => {
+    const rows = [{ id: 'creds', data: state.creds }];
+    for (const id in keys) rows.push({ id, data: keys[id] });
+    await supabase.from('whatsapp_auth').upsert(rows);
+  };
+  return { state, saveCreds };
+}
 
 function getRefCode(phone) { return phone.slice(-4); }
 function normalize(phone) {
@@ -116,7 +147,8 @@ async function sendBidsToRider(sock, ride) {
 // Track timers so we don't send bids twice for same ride
 const bidTimers = new Map();
 async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth');
+  //const { state, saveCreds } = await useMultiFileAuthState('auth');
+  const { state, saveCreds } = await useSupabaseAuthState();
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
@@ -143,17 +175,6 @@ async function start() {
     }, 3000);
   }
 
-/*  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr && !PAIRING_NUMBER) qrcode.generate(qr, { small: true });
-    if (connection === 'open') console.log('Nditore is ONLINE ✅');
-    if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('Disconnected. Reconnect?', shouldReconnect);
-      if (shouldReconnect) start();
-    }
-  });
-*/
     sock.ev.on('connection.update', (update) => {
   const { connection, lastDisconnect, qr } = update;
   if (qr) {
