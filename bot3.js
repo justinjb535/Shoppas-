@@ -1,16 +1,23 @@
 // Nditori - WhatsApp Ride Bot - FINAL - Supabase + Bidding + Safety
 // Run: npm install && node index.js
 import 'dotenv/config';
-//import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import QRCode from 'qrcode';
 
+// ============ HELPERS (must be on top) ============
+function normalize(phone) {
+  phone = String(phone || '').trim().replace(/\s/g, '').replace(/^\+/, '');
+  if (phone.startsWith('0')) return '263' + phone.slice(1);
+  return phone;
+}
+function getRefCode(phone) { return String(phone).slice(-4); }
+
 // ============ CONFIG ============
-//const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '263779596966';
-const ADMIN_NUMBER = String(process.env.ADMIN_NUMBER || '263779596966').trim().replace(/\s/g, '').replace(/^\+/, '').replace(/^0/, '263');
+const ADMIN_NUMBER = normalize(process.env.ADMIN_NUMBER || '263779596966');
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER || '';
 const BOT_NAME = 'Nditore';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -53,11 +60,11 @@ app.get('/qr', async (req, res) => {
 
 app.get('/status', (req, res) => res.json({ status: connectionStatus, hasQR: !!latestQR }));
 
-app.listen(3000, () => console.log('Web server on 3000'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Web server on ' + PORT));
 
 // =============================================
 async function useSupabaseAuthState() {
-  // Load
   const { data } = await supabase.from('whatsapp_auth').select('*');
   let creds = null;
   let keys = {};
@@ -86,14 +93,6 @@ async function useSupabaseAuthState() {
     await supabase.from('whatsapp_auth').upsert(rows);
   };
   return { state, saveCreds };
-}
-
-function getRefCode(phone) { return phone.slice(-4); }
-function normalize(phone) {
-  phone = phone.trim();
-  if (phone.startsWith('0')) return '263' + phone.slice(1);
-  if (phone.startsWith('+263')) return phone.slice(1);
-  return phone;
 }
 
 // ---- Supabase Helpers ----
@@ -148,7 +147,6 @@ async function sendBidsToRider(sock, ride) {
 // Track timers so we don't send bids twice for same ride
 const bidTimers = new Map();
 async function start() {
-  //const { state, saveCreds } = await useMultiFileAuthState('auth');
   const { state, saveCreds } = await useSupabaseAuthState();
   const sock = makeWASocket({
     auth: state,
@@ -176,26 +174,26 @@ async function start() {
     }, 3000);
   }
 
-    sock.ev.on('connection.update', (update) => {
-  const { connection, lastDisconnect, qr } = update;
-  if (qr) {
-    latestQR = qr;
-    connectionStatus = 'waiting for scan - QR ready';
-    qrcode.generate(qr, { small: true });
-    console.log('New QR generated - open /qr to scan it');
-  }
-  if (connection === 'open') {
-    latestQR = null;
-    connectionStatus = 'ONLINE ✅';
-    console.log('Nditore is ONLINE ✅');
-  }
-  if (connection === 'close') {
-    connectionStatus = 'disconnected - reconnecting...';
-    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-    console.log('Disconnected. Reconnect?', shouldReconnect);
-    if (shouldReconnect) start();
-  }
-});
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      latestQR = qr;
+      connectionStatus = 'waiting for scan - QR ready';
+      qrcode.generate(qr, { small: true });
+      console.log('New QR generated - open /qr to scan it');
+    }
+    if (connection === 'open') {
+      latestQR = null;
+      connectionStatus = 'ONLINE ✅';
+      console.log('Nditore is ONLINE ✅');
+    }
+    if (connection === 'close') {
+      connectionStatus = 'disconnected - reconnecting...';
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Disconnected. Reconnect?', shouldReconnect);
+      if (shouldReconnect) start();
+    }
+  });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
@@ -204,7 +202,7 @@ async function start() {
     if (msg.key.remoteJid.endsWith('@g.us') || msg.key.remoteJid === 'status@broadcast') return;
 
     const from = msg.key.remoteJid;
-    const phone = from.split('@')[0];
+    const phone = normalize(from.split('@')[0].split(':')[0]);
     const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || '').trim();
 
     if (msg.message.contactMessage) {
@@ -213,12 +211,13 @@ async function start() {
     }
     if (!text) return;
     const upper = text.toUpperCase();
-    console.log(`From ${phone}: ${text}`);
+    console.log(`From ${phone}: ${text} | ADMIN=${ADMIN_NUMBER} | isAdmin=${phone === ADMIN_NUMBER}`);
     const send = async (txt) => await sock.sendMessage(from, { text: txt });
+    const isAdmin = phone === ADMIN_NUMBER;
 
     // ============ ADMIN ============
     if (upper.startsWith('GIVE ')) {
-      if (phone !== ADMIN_NUMBER) { await send(`Ha 😂 nice try. Only boss can give credits.`); return; }
+      if (!isAdmin) { await send(`Ha 😂 nice try. Only boss can give credits.`); return; }
       const parts = text.split(' ');
       let target = normalize(parts[1] || '');
       let amount = parseInt(parts[2] || '0');
@@ -229,7 +228,7 @@ async function start() {
     }
 
     if (upper.startsWith('APPROVE ')) {
-      if (phone !== ADMIN_NUMBER) { await send(`Only boss can approve.`); return; }
+      if (!isAdmin) { await send(`Only boss can approve.`); return; }
       let target = normalize(text.split(' ')[1] || '');
       if (!target) { await send(`Use: APPROVE 0712345678`); return; }
       const existing = await getDriver(target);
@@ -241,7 +240,7 @@ async function start() {
     }
 
     if (upper.startsWith('REJECT ')) {
-      if (phone !== ADMIN_NUMBER) { await send(`Only boss can reject.`); return; }
+      if (!isAdmin) { await send(`Only boss can reject.`); return; }
       let target = normalize(text.split(' ')[1] || '');
       if (!target) { await send(`Use: REJECT 0712345678`); return; }
       await supabase.from('drivers').update({ approved: false, available: false }).eq('phone', target);
@@ -251,7 +250,7 @@ async function start() {
     }
 
     if (upper === 'LIST') {
-      if (phone !== ADMIN_NUMBER) { await send(`Only boss can see list.`); return; }
+      if (!isAdmin) { await send(`Only boss can see list.`); return; }
       const { data: all } = await supabase.from('drivers').select('*');
       if (!all || all.length === 0) { await send(`No drivers yet.`); return; }
       let out = `${BOT_NAME} Drivers:\n\n`;
@@ -333,7 +332,7 @@ async function start() {
     // ============ RIDE + BIDDING ============
     if (upper.startsWith('RIDE ')) {
       const rideText = text.slice(5);
-      const priceMatch = rideText.match(/\$(\d+(\.\d+)?)/);
+      const priceMatch = rideText.match(/\$\s*(\d+(\.\d+)?)/);
       let price = priceMatch ? parseFloat(priceMatch[1]) : 0;
       const rider = await getRider(phone);
       let hasDiscount = rider?.discount === 5;
@@ -359,7 +358,6 @@ async function start() {
           });
         } catch (e) {}
       }
-      // Auto-send bids after 2 mins if not already sent by 3 bids
       bidTimers.set(rideId, setTimeout(async () => {
         const { data: r } = await supabase.from('rides').select('*').eq('id', rideId).single();
         if (r && r.status === 'waiting') {
@@ -371,7 +369,6 @@ async function start() {
       return;
     }
 
-    // Driver bids: BID 123456 $3.50
     if (upper.startsWith('BID ')) {
       const parts = text.split(' ');
       const rideId = parts[1];
@@ -384,7 +381,6 @@ async function start() {
       }
       await supabase.from('bids').upsert({ ride_id: rideId, driver_phone: phone, bid_price: bidPrice, created_at: Date.now() });
       await send(`Your bid $${bidPrice.toFixed(2)} for ride ${rideId} is in ✅ Waiting for rider to pick. Bid lower if you want to win!`);
-      // If 3+ bids, send immediately, don't wait 2 mins
       const { data: allBids } = await supabase.from('bids').select('*').eq('ride_id', rideId);
       if (allBids.length >= 3) {
         if (bidTimers.has(rideId)) { clearTimeout(bidTimers.get(rideId)); bidTimers.delete(rideId); }
@@ -393,7 +389,6 @@ async function start() {
       return;
     }
 
-    // Rider picks: PICK 1, PICK 2, PICK 3
     if (upper.startsWith('PICK ')) {
       const pickNum = parseInt(text.split(' ')[1]);
       if (!pickNum) { await send(`Use: PICK 1 or PICK 2`); return; }
@@ -410,7 +405,8 @@ async function start() {
       if (ride.has_discount) await addCredits(driverPhone, 3);
       else await setCredits(driverPhone, (await getCredits(driverPhone)) - 1);
 
-      // SAFETY CARD to rider
+//      await send(`Done! You picked driver #${pickNum} ✅\n\n🚗 DRIVER INFO - CHECK BEFORE YOU GET IN:\nName / Car / Plate: ${driver?.info || driverPhone}\nPhone: ${driverPhone}\nPrice you agreed: $${chosenBid.bid_price.toFixed(2)}\nTrip: ${ride.ride_text}\n\n⚠️ SAFETY: Check plate matches before you get in. Share this with a friend. Don't get in if p
+            // SAFETY CARD to rider - CONTINUED
       await send(`Done! You picked driver #${pickNum} ✅\n\n🚗 DRIVER INFO - CHECK BEFORE YOU GET IN:\nName / Car / Plate: ${driver?.info || driverPhone}\nPhone: ${driverPhone}\nPrice you agreed: $${chosenBid.bid_price.toFixed(2)}\nTrip: ${ride.ride_text}\n\n⚠️ SAFETY: Check plate matches before you get in. Share this with a friend. Don't get in if plate is different.\n\nDriver will ask you where you are. Reply to me and I'll forward it.\nTo ask driver something, type: ASK ${ride.id} Your question`);
       // Notify winning driver
       try {
@@ -425,7 +421,6 @@ async function start() {
       return;
     }
 
-    // Driver asks rider: ASK 123456 What are you wearing? Which side are you on?
     if (upper.startsWith('ASK ')) {
       const parts = text.split(' ');
       const rideId = parts[1];
@@ -440,7 +435,6 @@ async function start() {
       return;
     }
 
-    // Rider answers: ANSWER 123456 I'm in red jacket, near KFC side
     if (upper.startsWith('ANSWER ')) {
       const parts = text.split(' ');
       const rideId = parts[1];
@@ -448,14 +442,13 @@ async function start() {
       if (!rideId || !answer) { await send(`Use: ANSWER 123456 I'm in red jacket`); return; }
       const { data: ride } = await supabase.from('rides').select('*').eq('id', rideId).single();
       if (!ride || !ride.driver) { await send(`Ride not found or driver not picked yet.`); return; }
-     try {
+      try {
         await sock.sendMessage(ride.driver + '@s.whatsapp.net', { text: `${BOT_NAME}: Rider answers:\n"${answer}"\n\nTrip: ${ride.ride_text}` });
         await send(`Sent to driver ✅`);
       } catch (e) {}
       return;
     }
 
-    // Rider can rate after ride: RATE 123456 5
     if (upper.startsWith('RATE ')) {
       const parts = text.split(' ');
       const rideId = parts[1];
@@ -464,7 +457,6 @@ async function start() {
       return;
     }
 
-    // Fallback - if nothing matched
     await send(`Sorry, I didn't understand. Type HI to start again.`);
   });
 }
