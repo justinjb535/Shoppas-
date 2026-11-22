@@ -4,8 +4,9 @@ import 'dotenv/config';
 import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
-import qrcode from 'qrcode-terminal';
 import pino from 'pino';
+import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode';
 
 // ============ CONFIG ============
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '263779596966';
@@ -15,8 +16,44 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 
 // Keep Render alive
 const app = express();
+let latestQR = null;
+let connectionStatus = 'starting...';
+
 app.get('/', (req, res) => res.send('Nditore is alive ✅'));
+
+app.get('/qr', async (req, res) => {
+  if (!latestQR) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:40px">
+        <h2>Nditore QR</h2>
+        <p>Status: ${connectionStatus}</p>
+        <p>No QR yet - bot is already paired, or still starting.</p>
+        <p>Refresh in 5 seconds...</p>
+        <script>setTimeout(()=>location.reload(), 5000)</script>
+      </body></html>
+    `);
+  }
+  try {
+    const qrImage = await QRCode.toDataURL(latestQR);
+    res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:20px">
+        <h2>Scan this with WhatsApp</h2>
+        <p>Status: ${connectionStatus}</p>
+        <img src="${qrImage}" style="width:300px;height:300px;border:1px solid #ccc;padding:10px" />
+        <p>WhatsApp > Settings > Linked Devices > Link a Device > Scan this</p>
+        <p>QR refreshes every 20 seconds</p>
+        <script>setTimeout(()=>location.reload(), 20000)</script>
+      </body></html>
+    `);
+  } catch (e) {
+    res.send('QR error: ' + e.message);
+  }
+});
+
+app.get('/status', (req, res) => res.json({ status: connectionStatus, hasQR: !!latestQR }));
+
 app.listen(3000, () => console.log('Web server on 3000'));
+
 // =============================================
 
 function getRefCode(phone) { return phone.slice(-4); }
@@ -106,7 +143,7 @@ async function start() {
     }, 3000);
   }
 
-  sock.ev.on('connection.update', (update) => {
+/*  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr && !PAIRING_NUMBER) qrcode.generate(qr, { small: true });
     if (connection === 'open') console.log('Nditore is ONLINE ✅');
@@ -116,6 +153,27 @@ async function start() {
       if (shouldReconnect) start();
     }
   });
+*/
+    sock.ev.on('connection.update', (update) => {
+  const { connection, lastDisconnect, qr } = update;
+  if (qr) {
+    latestQR = qr;
+    connectionStatus = 'waiting for scan - QR ready';
+    qrcode.generate(qr, { small: true });
+    console.log('New QR generated - open /qr to scan it');
+  }
+  if (connection === 'open') {
+    latestQR = null;
+    connectionStatus = 'ONLINE ✅';
+    console.log('Nditore is ONLINE ✅');
+  }
+  if (connection === 'close') {
+    connectionStatus = 'disconnected - reconnecting...';
+    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+    console.log('Disconnected. Reconnect?', shouldReconnect);
+    if (shouldReconnect) start();
+  }
+});
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
