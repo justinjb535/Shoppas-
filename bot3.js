@@ -9,7 +9,8 @@ import qrcode from 'qrcode-terminal';
 import QRCode from 'qrcode';
 
 // ============ CONFIG ============
-const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '263779596966';
+//const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '263779596966';
+const ADMIN_NUMBER = String(process.env.ADMIN_NUMBER || '263779596966').trim().replace(/\s/g, '').replace(/^\+/, '').replace(/^0/, '263');
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER || '';
 const BOT_NAME = 'Nditore';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
