@@ -5,6 +5,7 @@ import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeys
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
+import pino from 'pino';
 
 // ============ CONFIG ============
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER || '263779596966';
@@ -82,10 +83,13 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth');
   const sock = makeWASocket({
     auth: state,
-    logger: { level: 'silent', child: () => ({ level: 'silent' }) },
-    syncFullHistory: false,
-    markOnlineOnConnect: false,
-    generateHighQualityLinkPreview: false,
+//    logger: { level: 'silent', child: () => ({ level: 'silent' }) },
+  const sock = makeWASocket({
+  auth: state,
+  logger: pino({ level: 'silent' }),
+  syncFullHistory: false,
+  markOnlineOnConnect: false,
+  generateHighQualityLinkPreview: false,
     shouldIgnoreJid: (jid) => {
       if (jid.endsWith('@broadcast')) return true;
       if (jid.endsWith('@g.us')) return true;
