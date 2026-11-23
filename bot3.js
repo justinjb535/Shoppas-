@@ -301,6 +301,7 @@ sock.ev.on('connection.update', async (update) => {
 });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    console.log('📩 MESSAGE EVENT:', type, JSON.stringify(messages[0]?.key));
     if (type !== 'notify') return;
     const msg = messages[0];
     if (!msg.message || msg.key.fromMe) return;
