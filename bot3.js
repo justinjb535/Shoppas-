@@ -1,4 +1,6 @@
 import 'dotenv/config';
+// You need this at top, otherwise bot crashes before QR:
+import { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';// You need this at top, otherwise bot crashes before QR:
 import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
@@ -63,7 +65,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Web server on ' + PORT));
 
 // =============================================
-async function useSupabaseAuthState() {
+/*async function useSupabaseAuthState() {
   const { data } = await supabase.from('whatsapp_auth').select('*');
   let creds = null;
   let keys = {};
@@ -89,6 +91,42 @@ async function useSupabaseAuthState() {
   const saveCreds = async () => {
     const rows = [{ id: 'creds', data: state.creds }];
     for (const id in keys) rows.push({ id, data: keys[id] });
+    await supabase.from('whatsapp_auth').upsert(rows);
+  };
+  return { state, saveCreds };
+}
+*/
+
+async function useSupabaseAuthState() {
+  const { data } = await supabase.from('whatsapp_auth').select('*');
+  let creds = initAuthCreds();
+  let keys = {};
+  if (data) {
+    for (const row of data) {
+      if (row.id === 'creds') {
+        // Supabase returns JSON, need to revive Buffers
+        creds = JSON.parse(JSON.stringify(row.data), BufferJSON.reviver);
+      } else {
+        keys[row.id] = JSON.parse(JSON.stringify(row.data), BufferJSON.reviver);
+      }
+    }
+  }
+  const state = {
+    creds,
+    keys: {
+      get: (type, ids) => {
+        const out = {};
+        for (const id of ids) if (keys[`${type}-${id}`]) out[id] = keys[`${type}-${id}`];
+        return out;
+      },
+      set: (data) => {
+        for (const type in data) for (const id in data[type]) keys[`${type}-${id}`] = data[type][id];
+      }
+    }
+  };
+  const saveCreds = async () => {
+    const rows = [{ id: 'creds', data: JSON.parse(JSON.stringify(state.creds, BufferJSON.replacer)) }];
+    for (const id in keys) rows.push({ id, data: JSON.parse(JSON.stringify(keys[id], BufferJSON.replacer)) });
     await supabase.from('whatsapp_auth').upsert(rows);
   };
   return { state, saveCreds };
@@ -145,7 +183,7 @@ async function sendBidsToRider(sock, ride) {
 
 // Track timers so we don't send bids twice for same ride
 const bidTimers = new Map();
-async function start() {
+/*async function start() {
   const { state, saveCreds } = await useSupabaseAuthState();
   const sock = makeWASocket({
     auth: state,
@@ -172,8 +210,53 @@ async function start() {
       } catch (e) { console.log('Pairing error', e.message); }
     }, 3000);
   }
+a*/
 
-  sock.ev.on('connection.update', (update) => {
+async function startBot() {
+  const { state, saveCreds } = await useSupabaseAuthState();
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false, // we show it on website, not terminal
+    browser: ['Nditore', 'Chrome', '1.0'],
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('New QR generated - open /qr to scan it');
+      latestQR = qr; // <-- THIS WAS MISSING, THIS IS THE FIX
+      connectionStatus = 'waiting for scan - QR ready';
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed. Reconnecting?', shouldReconnect);
+      connectionStatus = 'disconnected - reconnecting...';
+      latestQR = null;
+      if (shouldReconnect) {
+        setTimeout(startBot, 3000);
+      } else {
+        // Logged out - wipe Supabase so next restart makes a fresh QR
+        console.log('Logged out - clearing Supabase auth');
+        await supabase.from('whatsapp_auth').delete().neq('id', '___never___');
+        connectionStatus = 'logged out - delete auth and restart';
+        setTimeout(startBot, 3000);
+      }
+    }
+
+    if (connection === 'open') {
+      console.log('✅ Nditore ONLINE');
+      connectionStatus = 'ONLINE ✅';
+      latestQR = null;
+    }
+  });
+
+/*  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) {
       latestQR = qr;
@@ -193,6 +276,31 @@ async function start() {
       if (shouldReconnect) start();
     }
   });
+*/
+
+sock.ev.on('connection.update', async (update) => {
+  const { connection, lastDisconnect, qr } = update;
+  if (qr) {
+    latestQR = qr;
+    connectionStatus = 'waiting for scan - QR ready';
+  }
+  if (connection === 'close') {
+    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+    latestQR = null;
+    if (shouldReconnect) {
+      setTimeout(startBot, 3000);
+    } else {
+      // Logged out - wipe auth so next start makes fresh QR
+      await supabase.from('whatsapp_auth').delete().neq('id', '___never___');
+      connectionStatus = 'logged out - restart for fresh QR';
+      setTimeout(startBot, 3000);
+    }
+  }
+  if (connection === 'open') {
+    connectionStatus = 'ONLINE ✅';
+    latestQR = null;
+  }
+});
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
