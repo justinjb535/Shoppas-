@@ -1,5 +1,3 @@
-// Nditori - WhatsApp Ride Bot - FINAL - Supabase + Bidding + Safety
-// Run: npm install && node index.js
 import 'dotenv/config';
 import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
@@ -20,6 +18,7 @@ function getRefCode(phone) { return String(phone).slice(-4); }
 const ADMIN_NUMBER = normalize(process.env.ADMIN_NUMBER || '263779596966');
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER || '';
 const BOT_NAME = 'Nditore';
+const ECOCASH_NUMBER = '0777708423';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // Keep Render alive
@@ -232,10 +231,10 @@ async function start() {
       let target = normalize(text.split(' ')[1] || '');
       if (!target) { await send(`Use: APPROVE 0712345678`); return; }
       const existing = await getDriver(target);
-      if (existing) await supabase.from('drivers').update({ approved: true }).eq('phone', target);
-      else await supabase.from('drivers').insert({ phone: target, info: 'Unknown - approved by boss', approved: true, available: false, credits: 0 });
-      await send(`Done ✅ ${target} is APPROVED.`);
-      try { await sock.sendMessage(target + '@s.whatsapp.net', { text: `${BOT_NAME}: You are APPROVED! ✅\nWelcome driver! Type:\nAVAILABLE Epworth\nto start getting rides.` }); } catch (e) {}
+      if (existing) await supabase.from('drivers').update({ approved: true, credits: 2 }).eq('phone', target);
+      else await supabase.from('drivers').insert({ phone: target, info: 'Unknown - approved by boss', approved: true, available: false, credits: 2 });
+      await send(`Done ✅ ${target} is APPROVED with 2 FREE credits.`);
+      try { await sock.sendMessage(target + '@s.whatsapp.net', { text: `${BOT_NAME}: You are APPROVED! ✅\nYou got 2 FREE credits worth $1! That is 2 FREE rides.\nDo your first rides, make $10-$20 profit, then top up.\nType:\nAVAILABLE Epworth\nto start getting rides.` }); } catch (e) {}
       return;
     }
 
@@ -260,30 +259,53 @@ async function start() {
       return;
     }
 
+    if (upper === 'PENDING') {
+      if (!isAdmin) { await send(`Only boss can see pending.`); return; }
+      const { data: all } = await supabase.from('drivers').select('*').eq('approved', false);
+      if (!all || all.length === 0) { await send(`No pending drivers. All approved ✅`); return; }
+      let out = `Pending Drivers (${all.length}):\n\n`;
+      for (let d of all) out += `${d.phone} - ${d.info || ''} - Credits: ${d.credits || 0}\n\n`;
+      out += `To approve: APPROVE 071...`;
+      await send(out);
+      return;
+    }
+
+    if (upper === 'STATS') {
+      if (!isAdmin) { await send(`Only boss.`); return; }
+      const { data: drivers } = await supabase.from('drivers').select('*');
+      const { data: rides } = await supabase.from('rides').select('*');
+      const completed = (rides || []).filter(r => r.status === 'completed').length;
+      const waiting = (rides || []).filter(r => r.status === 'waiting').length;
+      const matched = (rides || []).filter(r => r.status === 'matched').length;
+      const cancelled = (rides || []).filter(r => r.status === 'cancelled').length;
+      await send(`${BOT_NAME} Stats 📊\n\nDrivers: ${(drivers || []).length}\nApproved: ${(drivers || []).filter(d => d.approved).length}\nAvailable now: ${(drivers || []).filter(d => d.available).length}\n\nRides: ${(rides || []).length}\nCompleted: ${completed}\nWaiting: ${waiting}\nMatched: ${matched}\nCancelled: ${cancelled}\n\nEach completed ride = $0.50 to you. Estimated earnings: $${(completed * 0.5).toFixed(2)}`);
+      return;
+    }
+
     // ============ USER ============
     if (upper === 'CREDITS' || upper === 'BALANCE') {
-      await send(`Mhoro! You have ${await getCredits(phone)} credits.\nYour referral code is: ${getRefCode(phone)}\nShare ${BOT_NAME} to a friend, tell them to type: REF ${getRefCode(phone)} and you both get 5% OFF next ride.`);
+      await send(`Mhoro! You have ${await getCredits(phone)} credits.\n1 credit = 1 accepted ride = $0.50.\nTop up: EcoCash $5 to ${ECOCASH_NUMBER} for 10 credits, $10 for 20 credits.\nSend proof to boss.\nYour referral code is: ${getRefCode(phone)}\nShare ${BOT_NAME} to a friend, tell them to type: REF ${getRefCode(phone)} and you both get 5% OFF next ride.`);
       return;
     }
 
     if (['HI', 'HELLO', 'MHORO', 'START'].includes(upper)) {
-      await send(`Mhoro, ndini ${BOT_NAME} 😊\n\nUnoda kuti ndikutore kupi?\n1 = I am a DRIVER\n2 = I need a RIDE\nType 1 or 2`);
+      await send(`Mhoro, ndini ${BOT_NAME} 😊\n Your new WhatsApp Hwindi, think of inDrive, bolt, Uber but on WhatsApp\n\nSaka Unoda kuti ndikutore kupi?\n1 = I am a DRIVER\n2 = I need a RIDE\nType 1 or 2`);
       return;
     }
 
     if (upper === '1') {
       const existing = await getDriver(phone);
-      if (!existing) await supabase.from('drivers').insert({ phone, approved: false, available: false, credits: 0 });
-      await send(`Okay driver! 🚗\nTo register, send:\nREGISTER Tendai Moyo | Honda Fit Silver | ABC123\nExample: REGISTER Tendai Moyo | Honda Fit Silver | ABC123\n\nThen send your ID + selfie to boss for approval.`);
+      if (!existing) await supabase.from('drivers').insert({ phone, approved: false, available: false, credits: 2 });
+      await send(`Okay driver! 🚗\nTo register, send:\nREGISTER Tendai Moyo | Honda Fit Silver | ABC123\nExample: REGISTER Tendai Moyo | Honda Fit Silver | ABC123\n\nThen send your ID + selfie + 1. Driver's Licence photo, 2. PSV / Taxi permit photo & 3. VID disc photo for approval.\n\nNew drivers get 2 FREE credits = 2 FREE rides!`);
       return;
     }
 
     if (upper.startsWith('REGISTER ')) {
       const info = text.slice(9).trim();
       const existing = await getDriver(phone);
-      if (existing) await supabase.from('drivers').update({ info }).eq('phone', phone);
-      else await supabase.from('drivers').insert({ phone, info, approved: false, available: false, credits: 0 });
-      await send(`Thanks! I saved: ${info}\nNow send your ID + selfie + license to boss for approval. Once approved, type: AVAILABLE Epworth`);
+      if (existing) await supabase.from('drivers').update({ info, credits: 2 }).eq('phone', phone);
+      else await supabase.from('drivers').insert({ phone, info, approved: false, available: false, credits: 2 });
+      await send(`Thanks! I saved: ${info}\nYou have 2 FREE credits! 🎁\nNow send your ID + selfie + license for approval. Once approved, you can do 2 rides FREE, make $10-$20 profit.\nAfter that, EcoCash $5 to ${ECOCASH_NUMBER} to get 10 ride credits.`);
       return;
     }
 
@@ -293,7 +315,7 @@ async function start() {
       if (!driver) { await send(`You are not registered. Type 1 first.`); return; }
       if (!driver.approved) { await send(`Sorry, not APPROVED yet ❌\nBoss is still checking your ID. Wait for "You are APPROVED".`); return; }
       await supabase.from('drivers').update({ available: true, area, last_seen: Date.now() }).eq('phone', phone);
-      await send(`Sharp! You are AVAILABLE in ${area}. Credits: ${await getCredits(phone)}\nWhen a ride comes, reply: BID 123456 $3.50`);
+      await send(`Sharp! You are AVAILABLE in ${area}. Credits: ${await getCredits(phone)}\nAlerts are FREE. Bids are FREE. You only pay 1 credit ($0.50) when rider PICKS you.\nWhen a ride comes, reply: BID 123456 $3.50`);
       return;
     }
 
@@ -324,12 +346,56 @@ async function start() {
         await send(`Nice! You used REF ${refCode}. You get 5% OFF next ride. Your friend also gets 5% OFF. Now type: RIDE Epworth to Braeside KFC $4`);
         try { await sock.sendMessage(referrer + '@s.whatsapp.net', { text: `${BOT_NAME}: Someone used your code! You now have 5% OFF your next ride. Thanks for sharing 🙏` }); } catch (e) {}
       } else {
-        await send(`That code is not valid. Just type: RIDE Epworth to Braeside KFC $4`);
+        await send(`That code is not valid. Just type: RIDE Epworth to Braeside KFC, $4`);
       }
       return;
     }
 
-    // ============ RIDE + BIDDING ============
+    // ============ RIDE DONE + CANCEL ============
+    if (upper.startsWith('RIDE DONE') || upper.startsWith('DONE')) {
+      const parts = text.split(' ');
+      // RIDE DONE 123456 OR DONE 123456 OR just DONE
+      let rideId = parts[2] || parts[1];
+      if (rideId === 'DONE') rideId = null;
+      let ride = null;
+      if (rideId && !isNaN(rideId)) {
+        const { data } = await supabase.from('rides').select('*').eq('id', rideId).eq('driver', phone).eq('status', 'matched').single();
+        ride = data;
+      } else {
+        const { data: rides } = await supabase.from('rides').select('*').eq('driver', phone).eq('status', 'matched').order('id', { ascending: false }).limit(1);
+        ride = rides?.[0];
+      }
+      if (!ride) { await send(`No active ride found. You are not on a ride right now.`); return; }
+      await supabase.from('rides').update({ status: 'completed' }).eq('id', ride.id);
+      await supabase.from('drivers').update({ available: false }).eq('phone', phone);
+      await send(`Well done! 🎉 Ride ${ride.id} DONE.\nYou have ${await getCredits(phone)} credits left.\nType: AVAILABLE ${ride.ride_text.split(' ')[0]} to get new rides.`);
+      try { await sock.sendMessage(ride.rider + '@s.whatsapp.net', { text: `${BOT_NAME}: Your ride ${ride.id} is DONE! ✅\nHow was it? Type: RATE ${ride.id} 5\n1 = bad, 5 = amazing ⭐` }); } catch(e) {}
+      return;
+    }
+
+    if (upper.startsWith('CANCEL ')) {
+      const rideId = text.split(' ')[1];
+      const { data: ride } = await supabase.from('rides').select('*').eq('id', rideId).single();
+      if (!ride) { await send(`Ride ${rideId} not found.`); return; }
+      const isRider = ride.rider === phone;
+      const isDriver = ride.driver === phone;
+      if (!isRider && !isDriver) { await send(`You are not on ride ${rideId}. Only rider or driver can cancel.`); return; }
+      if (ride.status === 'completed' || ride.status === 'cancelled') { await send(`Ride ${rideId} is already ${ride.status}.`); return; }
+      await supabase.from('rides').update({ status: 'cancelled' }).eq('id', rideId);
+      if (ride.driver) {
+        await supabase.from('drivers').update({ available: false }).eq('phone', ride.driver);
+      }
+      if (isRider) {
+        await send(`Ride ${rideId} CANCELLED by you. No charge. Type RIDE ... to try again.`);
+        if (ride.driver) try { await sock.sendMessage(ride.driver + '@s.whatsapp.net', { text: `${BOT_NAME}: Rider cancelled ride ${rideId}. 😔\nTrip: ${ride.ride_text}\nYou are OFFLINE now. Type AVAILABLE <area> to get new rides.` }); } catch(e) {}
+      } else {
+        await send(`You cancelled ride ${rideId}. Rider has been told. Type AVAILABLE <area> when ready.`);
+        try { await sock.sendMessage(ride.rider + '@s.whatsapp.net', { text: `${BOT_NAME}: Driver cancelled ride ${rideId}. Sorry! 😔\nYour credits were NOT charged.\nType: RIDE ${ride.ride_text} to find another driver.` }); } catch(e) {}
+      }
+      return;
+    }
+
+         // ============ RIDE + BIDDING ============
     if (upper.startsWith('RIDE ')) {
       const rideText = text.slice(5);
       const priceMatch = rideText.match(/\$\s*(\d+(\.\d+)?)/);
@@ -350,11 +416,11 @@ async function start() {
       }
       const rideId = Date.now().toString().slice(-6);
       await supabase.from('rides').insert({ id: rideId, rider: phone, ride_text: rideText, price, final_price: finalPrice, has_discount: hasDiscount, status: 'waiting' });
-      await send(`Sharp! Looking for driver in ${fromArea}... Ride ID: ${rideId}\n${rideText}\n${hasDiscount ? `You used 5% discount! Max price: $${finalPrice.toFixed(2)}` : `Your max price: $${price}`}\nDrivers are bidding now. Wait 2 mins, I'll send you their bids.`);
+      await send(`Sharp! Looking for driver in ${fromArea}... Ride ID: ${rideId}\n${rideText}\n${hasDiscount ? `You used 5% discount! Max price: $${finalPrice.toFixed(2)}` : `Your max price: $${price}`}\nDrivers are bidding now. Wait 2 mins, I'll send you their bids.\nIf you change mind, type: CANCEL ${rideId}`);
       for (let driver of availableDrivers) {
         try {
           await sock.sendMessage(driver.phone + '@s.whatsapp.net', {
-            text: `${BOT_NAME}: New ride! 🚕\nRide ID: ${rideId}\n${rideText}\n${hasDiscount ? `Rider has 5% discount. Max price $${finalPrice.toFixed(2)}.` : `Rider max price: $${price}`}\n${hasDiscount ? `If you WIN this, you get 3 FREE credits! 🎁\n` : ``}Reply to bid:\nBID ${rideId} $3.50\nBid lower to win!`
+            text: `${BOT_NAME}: New ride! 🚕\nRide ID: ${rideId}\n${rideText}\n${hasDiscount ? `Rider has 5% discount. Max price $${finalPrice.toFixed(2)}.` : `Rider max price: $${price}`}\n${hasDiscount ? `If you WIN this, you get 3 FREE credits! 🎁\n` : ``}Reply to bid:\nBID ${rideId} $3.50\nBid lower to win! Bidding is FREE, you only pay when picked.`
           });
         } catch (e) {}
       }
@@ -376,11 +442,9 @@ async function start() {
       if (!rideId || !bidPrice) { await send(`Use: BID 123456 $3.50`); return; }
       const { data: ride } = await supabase.from('rides').select('*').eq('id', rideId).eq('status', 'waiting').single();
       if (!ride) { await send(`That ride is gone or already picked.`); return; }
-      if ((await getCredits(phone)) < 1 && !ride.has_discount) {
-        await send(`You have 0 credits. Send $5 EcoCash to boss to get 10 rides. Text CREDITS to check.`); return;
-      }
+      // BIDDING IS FREE - NO CREDIT CHECK HERE. Credits only deducted on PICK / ACCEPT.
       await supabase.from('bids').upsert({ ride_id: rideId, driver_phone: phone, bid_price: bidPrice, created_at: Date.now() });
-      await send(`Your bid $${bidPrice.toFixed(2)} for ride ${rideId} is in ✅ Waiting for rider to pick. Bid lower if you want to win!`);
+      await send(`Your bid $${bidPrice.toFixed(2)} for ride ${rideId} is in ✅ Bidding is FREE. You only pay 1 credit ($0.50) if rider PICKS you. Bid lower if you want to win!`);
       const { data: allBids } = await supabase.from('bids').select('*').eq('ride_id', rideId);
       if (allBids.length >= 3) {
         if (bidTimers.has(rideId)) { clearTimeout(bidTimers.get(rideId)); bidTimers.delete(rideId); }
@@ -388,6 +452,23 @@ async function start() {
       }
       return;
     }
+
+   if (upper.startsWith('COUNTER ') || upper.startsWith('OFFER ')) {
+  const parts = text.split(' ');
+  const rideId = parts[1];
+  const newPrice = parseFloat(parts[2]?.replace('$','') || '0');
+  const { data: ride } = await supabase.from('rides').select('*').eq('id', rideId).eq('rider', phone).single();
+  if (!ride) { await send(`Ride not found or not yours.`); return; }
+  if (!newPrice) { await send(`Use: COUNTER 123456 $12`); return; }
+  await supabase.from('rides').update({ price: newPrice, final_price: newPrice }).eq('id', rideId);
+  await send(`You offered $${newPrice} for ride ${rideId}. Drivers can now bid again.`);
+  // Tell all drivers who bid before
+  const { data: bids } = await supabase.from('bids').select('*').eq('ride_id', rideId);
+  for (let b of bids) {
+    try { await sock.sendMessage(b.driver_phone + '@s.whatsapp.net', { text: `${BOT_NAME}: Rider counter-offered $${newPrice} for ride ${rideId} (was $10). Do you accept? Reply BID ${rideId} $${newPrice} to accept.` }); } catch(e) {}
+  }
+  return;
+}
 
     if (upper.startsWith('PICK ')) {
       const pickNum = parseInt(text.split(' ')[1]);
@@ -400,22 +481,28 @@ async function start() {
       const chosenBid = allBids[pickNum - 1];
       const driverPhone = chosenBid.driver_phone;
       const driver = await getDriver(driverPhone);
+      // CHECK CREDITS HERE - NOT ON BID. Driver must have 1 credit to be picked, unless discount ride.
+      if (!ride.has_discount && (await getCredits(driverPhone)) < 1) {
+        await send(`That driver has 0 credits, can't accept. Pick another driver or wait. Driver needs to top up: EcoCash $5 to ${ECOCASH_NUMBER} for 10 credits.`);
+        return;
+      }
       if (bidTimers.has(ride.id)) { clearTimeout(bidTimers.get(ride.id)); bidTimers.delete(ride.id); }
       await supabase.from('rides').update({ status: 'matched', driver: driverPhone }).eq('id', ride.id);
+      // DEDUCT 1 CREDIT = $0.50 - THIS IS WHERE NDITORE MAKES MONEY
       if (ride.has_discount) await addCredits(driverPhone, 3);
       else await setCredits(driverPhone, (await getCredits(driverPhone)) - 1);
+      // Driver is now BUSY - no more alerts until RIDE DONE
+      await supabase.from('drivers').update({ available: false }).eq('phone', driverPhone);
 
-//      await send(`Done! You picked driver #${pickNum} ✅\n\n🚗 DRIVER INFO - CHECK BEFORE YOU GET IN:\nName / Car / Plate: ${driver?.info || driverPhone}\nPhone: ${driverPhone}\nPrice you agreed: $${chosenBid.bid_price.toFixed(2)}\nTrip: ${ride.ride_text}\n\n⚠️ SAFETY: Check plate matches before you get in. Share this with a friend. Don't get in if p
-            // SAFETY CARD to rider - CONTINUED
-      await send(`Done! You picked driver #${pickNum} ✅\n\n🚗 DRIVER INFO - CHECK BEFORE YOU GET IN:\nName / Car / Plate: ${driver?.info || driverPhone}\nPhone: ${driverPhone}\nPrice you agreed: $${chosenBid.bid_price.toFixed(2)}\nTrip: ${ride.ride_text}\n\n⚠️ SAFETY: Check plate matches before you get in. Share this with a friend. Don't get in if plate is different.\n\nDriver will ask you where you are. Reply to me and I'll forward it.\nTo ask driver something, type: ASK ${ride.id} Your question`);
+      await send(`Done! You picked driver #${pickNum} ✅\n\n🚗 DRIVER INFO - CHECK BEFORE YOU GET IN:\nName / Car / Plate: ${driver?.info || driverPhone}\nPhone: ${driverPhone}\nPrice you agreed: $${chosenBid.bid_price.toFixed(2)}\nTrip: ${ride.ride_text}\n\n⚠️ SAFETY: Check plate matches before you get in. Share this with a friend. Don't get in if plate is different.\n\nDriver will ask you where you are. Reply to me and I'll forward it.\nTo ask driver something, type: ASK ${ride.id} Your question\nIf you change mind, type: CANCEL ${ride.id}`);
       // Notify winning driver
       try {
-        await sock.sendMessage(driverPhone + '@s.whatsapp.net', { text: `${BOT_NAME}: You WON ride ${ride.id}! 🎉\nRider: ${ride.rider}\nTrip: ${ride.ride_text}\nYour winning bid: $${chosenBid.bid_price.toFixed(2)}\nCall rider now: ${ride.rider}\n\nTo ask rider something, type: ASK ${ride.id} What are you wearing?` });
+        await sock.sendMessage(driverPhone + '@s.whatsapp.net', { text: `${BOT_NAME}: You WON ride ${ride.id}! 🎉\nRider: ${ride.rider}\nTrip: ${ride.ride_text}\nYour winning bid: $${chosenBid.bid_price.toFixed(2)}\n1 credit ($0.50) deducted. You have ${await getCredits(driverPhone)} credits left.\nYou are now BUSY - you won't get new alerts until you finish.\nCall rider now: ${ride.rider}\n\nWhen ride is done, type: RIDE DONE ${ride.id}\nTo ask rider something, type: ASK ${ride.id} What are you wearing?\nTo cancel, type: CANCEL ${ride.id}` });
       } catch (e) {}
       // Notify losing drivers
       for (let b of allBids) {
         if (b.driver_phone !== driverPhone) {
-          try { await sock.sendMessage(b.driver_phone + '@s.whatsapp.net', { text: `${BOT_NAME}: Sorry, rider picked another driver for ride ${ride.id}. Don't worry, next ride is coming.` }); } catch (e) {}
+          try { await sock.sendMessage(b.driver_phone + '@s.whatsapp.net', { text: `${BOT_NAME}: Sorry, rider picked another driver for ride ${ride.id}. Don't worry, next ride is coming. Bidding was FREE, you lost 0 credits.` }); } catch (e) {}
         }
       }
       return;
@@ -453,11 +540,11 @@ async function start() {
       const parts = text.split(' ');
       const rideId = parts[1];
       const rating = parseInt(parts[2] || '5');
-      await send(`Thanks for rating ride ${rideId} ${rating}/5 ⭐ You helped other riders stay safe.`);
+      await send(`Thanks for rating ride ${rideId} ${rating}/5  ⭐ You helped other riders stay safe.`);
       return;
     }
 
-    await send(`Sorry, I didn't understand. Type HI to start again.`);
+    await send(`Sorry, I didn't understand. Type HI to start again. Or Type RIDE to get a ride`);
   });
 }
 
