@@ -243,7 +243,8 @@ sock.ev.on('connection.update', async (update) => {
     }
     if (!text) return;
     const upper = text.toUpperCase();
-    console.log(`From ${phone}: ${text} | ADMIN=${ADMIN_NUMBER} | isAdmin=${phone === ADMIN_NUMBER}`);
+   // console.log(`From ${phone}: ${text} | ADMIN=${ADMIN_NUMBER} | isAdmin=${phone === ADMIN_NUMBER}`);
+    console.log(`From ${phone}: ${text} | ADMIN=${ADMIN_NUMBERS} | isAdmin=${ADMIN_NUMBERS.includes(phone)}`);
     const send = async (txt) => await sock.sendMessage(from, { text: txt });
     //const isAdmin = phone === ADMIN_NUMBER;
     const isAdmin = ADMIN_NUMBERS.includes(phone);
