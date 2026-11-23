@@ -654,4 +654,4 @@ sock.ev.on('connection.update', async (update) => {
   });
 }
 
-start();
+startBot();
