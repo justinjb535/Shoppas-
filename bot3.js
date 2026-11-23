@@ -1,7 +1,5 @@
 import 'dotenv/config';
-// You need this at top, otherwise bot crashes before QR:
-import { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';// You need this at top, otherwise bot crashes before QR:
-import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, DisconnectReason, initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import pino from 'pino';
